@@ -1,0 +1,49 @@
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+libs = ["lib"]
+
+# 0.8.26 is what v4-periphery pins; PermissionsAdapter.sol declares it exactly
+# (`pragma solidity 0.8.26`), so anything else fails to compile against it.
+# The ENS interfaces are `>=0.8.13` and are satisfied by this.
+solc_version = "0.8.26"
+evm_version = "cancun"
+
+optimizer = true
+optimizer_runs = 200
+
+# via_ir is deliberately OFF: it roughly triples build time and our own contracts
+# are simple enough not to need it. If a fork test that pulls in
+# PermissionedPositionManager ever hits stack-too-deep, turn it on for that
+# profile rather than globally.
+via_ir = false
+
+gas_reports = ["ENSAllowlistChecker", "IssuerAllowlistCheckerFlat"]
+ffi = false
+
+# Scripts read/write the shared address book at the repo root.
+fs_permissions = [{ access = "read-write", path = "../deployments.json" }]
+
+[profile.ci]
+fuzz = { runs = 10_000 }
+verbosity = 3
+
+# Gas benchmarks (bench/RESULTS.md, Day 7) need headroom above a normal block
+# limit to run the large-registry comparison cases in one call.
+[profile.gas]
+gas_limit = 50_000_000
+
+[fuzz]
+runs = 256
+
+[rpc_endpoints]
+sepolia = "${SEPOLIA_RPC_URL}"
+sepolia_backup = "${SEPOLIA_RPC_URL_BACKUP}"
+
+[etherscan]
+sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 11155111 }
+
+[lint]
+lint_on_build = false

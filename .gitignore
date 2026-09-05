@@ -1,0 +1,23 @@
+# --- secrets ---
+.env
+.env.*
+!.env.example
+
+# --- foundry (contracts/) ---
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+contracts/.gas-snapshot
+contracts/lcov.info
+contracts/coverage/
+
+# --- node ---
+node_modules/
+.pnpm-store/
+
+# --- os / editor ---
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
