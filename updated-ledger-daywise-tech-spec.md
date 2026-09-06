@@ -1,8 +1,23 @@
 # Canopy — Day-by-Day Technical Spec
 
 > **The project is named Canopy.** It was called Ledger through the planning docs; contract and
-> library names use `Canopy*` (e.g. `CanopyRoles`). The parent name is `canopy.eth` — 6 characters,
-> so the $8/yr tier, and confirmed available on the hackathon deployment.
+> library names use `Canopy*` (e.g. `CanopyRoles`). `canopy.eth` — 6 characters, so the $8/yr tier,
+> and confirmed available on the hackathon deployment — is the **platform root**, not an issuer.
+
+> ### ⚠️ Model change — Sep 6
+>
+> Canopy was single-issuer through Sep 5: `canopy.eth` *was* the issuer. It is now a **platform that
+> onboards many issuers**, each of whom onboards brokers, who introduce investors.
+>
+> Three consequences run through everything below:
+> 1. The hierarchy gains a level — platform → issuer → broker → investor.
+> 2. **A broker onboarded by several issuers holds several names**, one under each. A name has one
+>    parent; two issuers means two names, two registries, two independent books.
+> 3. **Each issuer gets their own pool and their own checker.** Eligibility is issuer-scoped: being
+>    good for Acme's pool says nothing about Zenith's.
+>
+> Sections marked **[new Sep 6]** or **[changed Sep 6]** are the delta. Nothing about the Uniswap
+> integration, the role constants, or the expiry mechanism changed.
 
 **Derived from:** `ledger-spec-and-plan.md` (Rev 3, Sep 5 2026 — source-verified)
 **Event:** ETHOnline 2026, Sep 4 – Sep 13 · **9 working days, Days 1–2 compressed into Sep 5**
@@ -24,10 +39,17 @@ Verification work originally scheduled for Sep 4 has already been completed by r
 | **Gate 3** — role-bit collision | ✅ Closed — original bits collided, values moved to `1<<64` / `1<<68` |
 | **Gate 4** — on-camera expiry lapse | ✅ Closed — no minimum **subname** duration, no parent clamp (the 28-day minimum applies only to the parent, via the registrar) |
 | CRE simulate → Sepolia | ✅ Closed — `--broadcast` writes a real forwarder tx; beta enrollment not required |
-| **Gate 1** — hierarchy walk gas cost | ✅ **Closed Sep 5** — 3-hop cold walk **65,839** against a 120k budget, **~17.9k/hop** against a 40k limit. Keep the 3-level hierarchy; the 2-hop fallback is not needed |
+| **Gate 1** — hierarchy walk gas cost | ✅ **Closed Sep 5** · ⚠️ **confirm Sep 6** — 3-hop cold walk **65,839** against a 120k budget, **~17.9k/hop** against a 40k limit. The fourth level does **not** add a hop: `ROOT_ANCHOR` moves from `.eth` to the platform registry, so the walk is still two ancestor checks. Re-run `Gate1HierarchyGas.t.sol` against the 4-level tree — expected unchanged |
 | **Gate 5** — fresh `cre init` SDK drift | ⬜ **Open** — Builder B, **Sep 6** — hard deadline, no slack behind it |
 
 **Only Gate 5 remains, and it cannot force a pivot** — it has a known fallback (Confidential HTTP).
+
+**Gate 5 now answers two more questions [new Sep 6]**, both cheap to check while you are in there:
+- Can the enclave perform an **EVM read**, or are reads only available after `usingTheDons()`?
+- Must a value fetched inside the enclave be **byte-identical across nodes** for report consensus?
+
+Both feed the policy design (see "Where policy lives"). Neither can block it — the hash comparison
+uses only public values, so it can move outside the enclave if the answers are unfavourable.
 
 ---
 
@@ -36,7 +58,7 @@ Verification work originally scheduled for Sep 4 has already been completed by r
 | | Builder A | Builder B |
 |---|---|---|
 | **Owns** | `contracts/` — all Solidity, Foundry tests, deploy scripts, gas benchmarks | `cre/` and `frontend/` — workflow, mock KYC, Next.js console |
-| **Deploys** | Checker, registrar, attestor, ENS hierarchy, **both investor subnames** | Permissions adapter, pool, permissioned test token |
+| **Deploys** | Registrar, attestor, the whole ENS hierarchy, **one issuer registry and one checker per issuer**, bootstrap investor subnames | **One permissioned test token, adapter and pool per issuer** (two) |
 | **Writes** | `frontend/lib/canopy.ts` (the shared module), the end-to-end runner, demo video | `FEEDBACK.md`, `README.md`, submission forms |
 
 **Both commit daily starting today.** A single-commit final-day history disqualifies the Uniswap submission.
@@ -52,27 +74,56 @@ These are the only things that cross the boundary. Agree them in today's first h
 
 1. **The CRE report tuple** — Builder B encodes it, Builder A decodes it. Must match byte for byte:
    ```
-   address wallet, bytes32 labelBytes, address brokerRegistry,
+   uint8   kind,             // 0 = investor.  1 = broker — reserved, see Day 7
+   address subject,          // the wallet the name is registered to
+   bytes32 labelBytes,
+   address parentRegistry,   // the registry the name is minted into
    uint256 roleBitmap, uint64 expiry, bool approved
    ```
+
+   **[changed Sep 6]** `brokerRegistry` → `parentRegistry`: with issuers in the tree, the parent is
+   a *broker's* registry for an investor and an *issuer's* registry for a broker. `wallet` →
+   `subject` for the same reason.
+
+   **`kind` is a discriminator, and only `0` is ever emitted.** It is not a placeholder for a planned
+   feature — broker registration via CRE was considered and rejected on the merits (see "Who
+   registers what"). It earns its byte as a **decode guard**: `abi.decode` of a differently-shaped
+   report can succeed and yield garbage rather than revert, so the attestor asserts what it is
+   looking at before acting on it. Any future change to this tuple is then additive rather than a
+   silent mis-decode.
+
 2. **`ApplicationSubmitted` event** — Builder A defines, console emits, workflow triggers on it:
 
    ```solidity
    event ApplicationSubmitted(
        bytes32 indexed applicationId,
        address indexed wallet,
-       address indexed broker,      // which broker's registry the applicant is applying through
+       address indexed issuer,      // which issuer's registry — and therefore which pool
+       address broker,              // which broker's registry the applicant applies through
+       string  brokerPath,          // "acme/prime" — the policy key, see "Where policy lives"
        uint8   requestedTier        // 0 = retail (swap), 1 = market maker (swap + liquidity)
    );
    ```
 
-   Contains **no PII** — triggers run on Workflow DON nodes, not in the enclave. A broker address
-   is not PII, so carrying it here is safe.
+   Contains **no PII** — triggers run on Workflow DON nodes, not in the enclave. Issuer, broker and
+   broker path are not PII, so carrying them here is safe.
 
-   **`broker` is required and was previously missing.** The workflow must emit a report containing
-   `brokerRegistry`, but the trigger never told it which broker. The alternative — resolving it
-   inside the enclave from the application payload — puts a lookup in the TEE for a value that is
-   not secret. The broker is an *input* to the application, not something CRE decides.
+   **`issuer` is required [new Sep 6].** An applicant applies *to a specific issuer, through* a
+   specific broker. The pair decides which pool the eligibility is good for and which policy
+   evaluates them.
+
+   ⚠️ **Solidity allows three indexed parameters.** Adding `issuer` demotes `broker` to unindexed.
+   **That changes Builder B's log filter** — but filtering by issuer is what a per-issuer workflow
+   wants anyway.
+
+   **`brokerPath` is required [new Sep 6].** The rulebook is keyed by label path, not by registry
+   address, because addresses move every time we redeploy and label paths don't. The alternative —
+   recovering the path in the workflow by walking `getParent()` twice — is two EVM reads inside the
+   enclave on the highest-risk day.
+
+   `broker` carries the registry the subname is minted into. Resolving it inside the enclave would
+   put a lookup in the TEE for a value that is not secret. The broker is an *input* to the
+   application, not something CRE decides.
 
    `requestedTier` is what the applicant *asks for*. CRE decides what they actually get, and may
    approve a lower tier or reject outright.
@@ -85,12 +136,21 @@ These are the only things that cross the boundary. Agree them in today's first h
    wallet strategy afterwards means re-registering, and a subname is not trivially movable. Settle
    this before Day 4 mints anything for real.
 
+   **[changed Sep 6]** One wallet may now legitimately hold *several* subnames — one per issuer it
+   is eligible under. The old "every investor needs a distinct address" rule becomes **distinct
+   within an issuer**.
+
+6. **The policy hash [new Sep 6].** Builder B authors the issuer and broker policies and holds the
+   bodies in the CRE Vault secret. Builder A writes their **hashes** into ENS text records. Only the
+   hash crosses the boundary — it travels in `script/hierarchy.json` as `policyHash`. See "Where
+   policy lives".
+
 ---
 
 ## The end-to-end flow
 
 This is the demo, and it is also the acceptance test. Everything else in this document exists to
-make these eleven beats run.
+make these fifteen beats run.
 
 ### Terminal first, then the visual
 
@@ -113,66 +173,253 @@ frontend/lib/canopy.ts        eligibilityOf() hierarchyOf() swap()
 
 Nothing outside that module talks to a contract directly.
 
+### The hierarchy [new Sep 6]
+
+```
+.eth   (ETHRegistry — ENS itself, above our world)
+└── canopy.eth                          PLATFORM root
+    ├── acme.canopy.eth                 issuer 1  ──▶ pool 1, acmeChecker
+    │   ├── prime.acme.canopy.eth       broker
+    │   │   ├── alice                   retail    (SWAP)
+    │   │   └── mm                      market maker (SWAP | LIQUIDITY)
+    │   └── delta.acme.canopy.eth       broker, stricter policy
+    └── zenith.canopy.eth               issuer 2  ──▶ pool 2, zenithChecker
+        └── prime.zenith.canopy.eth     THE SAME BROKER, a second name
+            ├── bob                     retail
+            └── mm2                     Zenith's market maker
+```
+
+**Why `prime` appears twice.** A name has exactly one parent, so a broker onboarded by two issuers
+holds two names in two registries. This is the mechanism, not a workaround: Acme dropping Prime must
+not touch Zenith's relationship with Prime, and two names give you that for free. Each issuer's grant
+expires on its own schedule.
+
+The same follows for investors. `alice` under `prime.acme` and `alice` under `prime.zenith` are two
+names for one wallet, and **each requires its own application** — see below.
+
 ### Who registers what
 
 | What | Registered by | CRE involved? |
 |---|---|---|
-| `canopy.eth` | the issuer — `DeployIssuerHierarchy` | no |
-| `brokerA`, `brokerB`, … | the issuer — `DeployIssuerHierarchy` | no |
-| `alice`, `mm`, `bob` | `SubnameRegistrar`, on a CRE verdict | **yes** |
+| `canopy.eth` | the platform — `DeployIssuerHierarchy` | no |
+| `acme`, `zenith` | the platform — `DeployIssuerHierarchy` | no |
+| `prime`, `delta`, … under each issuer | **the issuer** — `DeployIssuerHierarchy` | no |
+| `alice`, `mm`, `bob`, … | `SubnameRegistrar`, on a CRE verdict | **yes** |
 
-**Brokers are infrastructure.** Onboarding one reflects a distribution agreement the issuer already
-signed: register the name, deploy them a `UserRegistry`, wire `setParent`. No compliance check.
+**Issuers are onboarded by the platform.** A commercial contract; the root of trust has to sit
+somewhere. Not a CRE decision, and deliberately so.
 
-**Investors apply *through* a broker.** The applicant names their broker; CRE decides only
-**approved or not** and **at what tier**. It never decides *under whom* — the broker is an input to
-the application, and `brokerRegistry` rides in the report so `MintAttestor` knows where to mint.
+**Brokers are onboarded by their issuer, not by CRE [decided Sep 6].** Acme's admin key registers
+`prime` in Acme's registry with an expiry. Routing this through CRE was considered and rejected: it
+would buy third-party verifiability of a decision the issuer is entitled to make unilaterally, and
+nothing else. In particular it would **not** add the expiry cascade — that is a property of the
+*name*, not of who minted it, so Acme registering `prime` for 90 days gives the identical
+non-transaction revocation.
+
+**This is a decision on the merits, not a deferral.** It is not parked on a later day and it is not
+a stretch goal: spare capacity should go somewhere that buys more. It is written up here so nobody
+re-proposes it in week two without new information.
+
+**Investors apply to an issuer, through a broker.** The applicant names both; CRE decides only
+**approved or not** and **at what tier**, against that broker's policy under that issuer. It never
+decides *under whom* — issuer and broker are inputs, and `parentRegistry` rides in the report so
+`MintAttestor` knows where to mint.
+
+**One application per (issuer, broker) pair.** Being onboarded by Prime does *not* grant access to
+every issuer Prime works with. If it did, Zenith's pool would admit an account Zenith's rulebook
+never evaluated — which is the first thing a judge probes. Alice wanting Zenith's pool applies again
+and Zenith's policy gets a say.
 
 **Only a CRE verdict can mint eligibility.** The broker never sends the transaction;
 `SubnameRegistrar` does, holding `ROLE_REGISTRAR` on each broker registry. A broker cannot onboard a
-client who failed the check. That is exactly what makes the cascade meaningful: a broker controls
-nothing about eligibility except their own name staying alive, and when it lapses everyone they
-introduced goes with them.
+client who failed the check. That is what makes the cascade meaningful: a broker controls nothing
+about eligibility except their own name staying alive, and when it lapses everyone they introduced
+goes with them.
 
 Investors registered directly by the deploy script are **bootstrap only** — Day 3 precedes CRE, and
-the demo needs `alice` and `mm` guaranteed present. Everyone after that arrives through the product.
+the demo needs its cast guaranteed present. Everyone after that arrives through the product.
 
-### The eleven beats
+### Cross-issuer isolation [new Sep 6]
 
-Setup (idempotent, off camera): permissioned token + adapter + pool with the flat checker (B); ENS
-parent, registries, attestor, registrar (A); both investors holding the underlying token with Permit2
-approved.
+**One checker per issuer pool**, each with a new immutable `ISSUER_REGISTRY` that the upward walk
+must **pass through** before it terminates at `ROOT_ANCHOR`.
+
+Without it, every checker under one platform root admits every issuer's investors: the walk asserts
+only *"reaches `ROOT_ANCHOR`"*, which under a shared root degrades to *"is somewhere in Canopy"*.
+Acme's pool would admit Zenith's clients.
+
+This is the multi-tenant twin of the `setParent` trap — a happy-path test never catches it, and the
+failure grants rather than denies. Both are guarded by fork tests.
+
+One checker per issuer rather than one multi-tenant checker, because it keeps `leafOf` as
+`mapping(address => Leaf)`: each checker holds its own leaf per wallet, so a wallet eligible under
+both issuers needs no storage change. A single shared checker would need
+`mapping(account => mapping(issuer => Leaf))`, and getting that wrong means Zenith's mint silently
+overwrites Acme's and revokes it.
+
+### The fifteen beats
+
+Setup (idempotent, off camera): **two** permissioned tokens + adapters + pools, each with the flat
+checker (B); platform root, two issuers, brokers, registries, attestor, registrar, two checkers (A);
+investors holding the right underlying token with Permit2 approved; **Zenith's pool seeded with depth
+by its own market maker**, so beat 10 has somewhere to trade.
 
 | # | Beat | Proves |
 |---|---|---|
-| 1 | `alice` applies → CRE **APPROVE** → subname minted with `ROLE_ELIGIBLE_SWAP` | the CRE mint path |
+| 1 | `alice` applies **to Acme through `prime`** → CRE **APPROVE** → subname minted under `prime.acme` with `ROLE_ELIGIBLE_SWAP` | the CRE mint path |
 | 2 | A second applicant → CRE **REJECT** → no subname, no access | the engine actually discriminates |
-| 3 | `mm` applies → APPROVE with **both** role bits | two tiers exist |
-| 4 | `adapter.updateAllowListChecker(ensAllowlistChecker)` | one transaction turns a flat permissioned pool into a hierarchical one |
-| 5 | `mm` adds liquidity (caller == recipient) → **succeeds** | the MM tier, and the pool gets depth |
-| 6 | `alice` swaps → **succeeds** | the retail tier |
-| 7 | `alice` attempts `addLiquidity` → **reverts** | **the tier split.** Two successes prove nothing; the refusal is the proof |
-| 8 | `brokerA` lapses — countdown to zero, **no transaction sent** | the money shot |
-| 9 | `alice` and `mm` both attempt swaps → **both revert `Unauthorized`** | the chain refusing, not our UI greying out |
-| 10 | `mm` removes liquidity → **succeeds** | not frozen. Exposure can always be unwound |
-| 11 | `brokerA` re-registers → investors stay dead | version-stamped resources; a lapsed broker cannot resurrect their book |
+| 3 | That same applicant re-applies **through `delta`** (stricter policy, same issuer) → still **REJECT**; a borderline applicant passes under `prime` and fails under `delta` | **per-broker criteria are real** — one engine, two rulebooks, neither disclosed |
+| 4 | `mm` applies → APPROVE with **both** role bits | two tiers exist |
+| 5 | `acmeAdapter.updateAllowListChecker(acmeChecker)` | one transaction turns a flat permissioned pool into a hierarchical one |
+| 6 | `mm` adds liquidity on **Acme's** pool (caller == recipient) → **succeeds** | the MM tier, and the pool gets depth |
+| 7 | `alice` swaps on Acme's pool → **succeeds** | the retail tier |
+| 8 | `alice` attempts `addLiquidity` → **reverts** | **the tier split.** Two successes prove nothing; the refusal is the proof |
+| 9 | `alice` attempts a swap on **Zenith's** pool → **reverts** | **cross-issuer isolation.** Eligibility is issuer-scoped, enforced on-chain |
+| 10 | `bob`, onboarded by `prime` **under Zenith**, swaps on Zenith's pool → **succeeds** | one broker, two issuers, two independent books |
+| 11 | **Acme's `prime` lapses** — countdown to zero, **no transaction sent** | the money shot |
+| 12 | `alice` and `mm` both attempt swaps on Acme → **both revert `Unauthorized`** | the chain refusing, not our UI greying out |
+| 13 | `bob` swaps on Zenith → **still succeeds** | **containment.** One issuer dropped one broker; the same broker's other book is untouched |
+| 14 | `mm` removes liquidity → **succeeds** | not frozen. Exposure can always be unwound |
+| 15 | Acme re-registers `prime` → its investors stay dead | version-stamped resources; a lapsed broker cannot resurrect their book |
 
-**Ordering is load-bearing.** Beat 5 must precede beat 6 — the pool needs depth before anyone can
-swap. Beat 4 must precede 5–7, or the flat checker is still answering.
+**Ordering is load-bearing.** Beat 6 must precede beat 7 — the pool needs depth before anyone can
+swap. Beat 5 must precede 6–8, or the flat checker is still answering. Beat 10 needs Zenith's pool
+already seeded, which is why that is setup rather than a beat.
 
-**Why 2, 7, 9, 10 and 11 are not optional.** Each closes a hole a judge would otherwise find: beat 2
-that the rulebook ever says no; beat 7 that tiers are real; beat 9 that the cut-off is enforced
-on-chain rather than by our frontend; beat 10 that we have not trapped anyone's funds — decreases and
-burns are never gated in the standard, and a knowledgeable judge is already wondering; beat 11 that
-the expiry cascade cannot be undone by re-registering.
+**Why 2, 3, 8, 9, 12, 13, 14 and 15 are not optional.** Each closes a hole a judge would otherwise
+find: beat 2 that the rulebook ever says no; beat 3 that "per-broker criteria" is a real mechanism
+and not a config file we describe; beat 8 that tiers are real; beat 9 that one issuer's approval is
+not a platform-wide pass; beat 12 that the cut-off is enforced on-chain rather than by our frontend;
+beat 13 that the cascade is *scoped* — without it the lapse looks like a global kill switch; beat 14
+that we have not trapped anyone's funds, since decreases and burns are never gated in the standard
+and a knowledgeable judge is already wondering; beat 15 that the cascade cannot be undone by
+re-registering.
 
-**Beat 8 is never a button.** Expiry is time passing. The only control that could force it is
+**Beats 9 and 13 are the two the new model exists to prove.** Isolation and containment. Both must
+be *reverts and successes on-chain*, never a badge going dark — a read-only demonstration is exactly
+the version a judge discounts.
+
+**Beat 11 is never a button.** Expiry is time passing. The only control that could force it is
 `unregister`, which is exactly the revocation transaction the pitch claims is unnecessary — filming
 it would refute the thesis. Setup between takes uses
 `contracts/script/deploy-hierarchy.sh --reset-broker`, off camera.
 
-**Beat 8 also has to be uncut**, and the badges must change with nobody touching the page. The chain
+**Beat 11 also has to be uncut**, and the badges must change with nobody touching the page. The chain
 does not push, so the console polls. If the moment needs a refresh, the judge sees a click.
+
+**The runner asserts all fifteen; the video films about six** — 6, 7, 8, 11, 12, 13, with 14 if there
+is room. See Day 9.
+
+---
+
+## Where policy lives [new Sep 6]
+
+Each broker may onboard investors on their own criteria, tighter than their issuer's floor. The
+policy has to be confidential, readable from the enclave, and controlled by the broker. **No single
+location gives all three:**
+
+| where | stays confidential | enclave can read it | broker can write it |
+|---|---|---|---|
+| repo (`main.ts`, a JSON file) | ❌ a public repo is a prize requirement | ✅ | ❌ |
+| on-chain (contract storage, text record) | ❌ | ✅ | ✅ |
+| **CRE Vault DON secret** | ✅ | ✅ | ❌ owner-scoped |
+| broker's own endpoint / IPFS | broker's choice | ✅ via `ConfidentialHTTPClient` | ✅ |
+
+So it is split across three artifacts:
+
+| artifact | where | public? | owned by |
+|---|---|---|---|
+| policy **body** — the values | Vault DON secret `ELIGIBILITY_RULEBOOK` | no | B |
+| policy **hash** | ENS text record `canopy:policy` on the broker's own name | yes | A (deploy script) |
+| policy **schema** — field list + combination rules | `cre/policy-schema.md` + a TS type, in the repo | **yes, deliberately** | B |
+
+Publishing the schema is not a leak — it is what makes the CRE claim checkable. A judge reads exactly
+what a policy can express and confirms none of the discriminating values are in the code.
+
+### The body
+
+One secret, one JSON object, flat keys on a **label path** — not a registry address, because
+addresses move every time we redeploy and label paths don't:
+
+```json
+{
+  "acme/_default":   { "version": 1, "minScore": 70, "maxTier": 1, "expiryDays": 365,
+                       "jurisdictions": { "allow": ["US-NY","GB","SG"], "deny": ["IR","KP"] } },
+  "acme/prime":      { "version": 1, "minScore": 80, "expiryDays": 90 },
+  "acme/delta":      { "version": 1, "minScore": 90, "maxTier": 0, "expiryDays": 30 },
+  "zenith/_default": { "version": 1, "minScore": 75, "maxTier": 1, "expiryDays": 180 }
+}
+```
+
+Broker entries are **overrides, not complete policies**: anything absent inherits the issuer default.
+
+`expiryDays` is the field to point at in the demo — `expiry` is already in the report tuple, so a
+broker choosing 30 vs 365 shows up **on-chain as different subname expiries with no new machinery**,
+and feeds the existing cascade. A conservative broker's book turns over quarterly. That is
+per-broker configuration a judge can see in a block explorer, which beats a threshold nobody can.
+
+### A broker may tighten, never loosen
+
+Combination is per field type, applied **inside the enclave** so the effective policy is never
+disclosed:
+
+| field type | combination | effect |
+|---|---|---|
+| numeric threshold (`minScore`, `minAge`) | `max(issuer, broker)` | broker can raise the bar |
+| allowlist (`jurisdictions.allow`, `accreditation`) | intersection | broker can only narrow |
+| denylist (`jurisdictions.deny`) | union | broker can only add |
+| `maxTier` | `min(issuer, broker)` | a retail-only broker cannot mint an MM |
+| `expiryDays` | `min(issuer, broker)` | broker cannot outlive the issuer's ceiling |
+
+This is what a compliance control *is*: the issuer sets the rules and gives up the discretion to make
+exceptions for a broker they want business with.
+
+### The hash
+
+Text record on the broker's own name, **scheme-prefixed**:
+
+```
+canopy:policy = "keccak256:0x8f3a…"
+```
+
+The prefix is why this design does not foreclose the broker-hosted version: it becomes
+`ipfs://bafy…` later and the workflow switches on the prefix. Nothing else moves — not the record
+key, not the role grant, not the deploy script.
+
+Issuer defaults get the same treatment one level up, so an issuer cannot quietly rewrite their own
+floor either.
+
+⚠️ **Canonicalize before hashing** — sorted keys, no whitespace, UTF-8, integers (RFC 8785 if you
+want a spec to cite). A hash over pretty-printed JSON breaks the first time an editor reformats it,
+and it breaks intermittently.
+
+**The role that makes it the broker's:** grant them `ROLE_SET_RESOLVER` (`1<<24`) scoped to their own
+name's resource in the issuer's registry, at registration. They can update their pointer; the issuer
+cannot.
+
+### What the workflow does
+
+```
+1. trigger → (issuer, broker, brokerPath, wallet, requestedTier)
+2. book = getSecrets(["ELIGIBILITY_RULEBOOK", "KYC_API_TOKEN"])
+3. issuerPolicy = book["acme/_default"];  brokerPolicy = book["acme/prime"]
+4. assert keccak(canonical(p)) == textRecord(<name>, "canopy:policy")   for both
+5. effective = combine(issuerPolicy, brokerPolicy)
+6. evaluate the applicant against effective
+7. expiry = now + effective.expiryDays
+```
+
+**Step 4 needs no confidentiality** — both sides of the comparison are public. If Gate 5 finds the
+enclave cannot do EVM reads, move the check outside it with no loss. The design survives either
+answer.
+
+**Updating a policy is two non-atomic writes** (secret, then record). In between, the hashes disagree
+and the workflow **rejects every application**. That is the correct failure mode and matches the
+checker — fail closed, never grant on an inconsistent view. Do not "fix" it into a warning.
+
+**One workflow, not one per broker.** `MintAttestor` gates on a single `EXPECTED_WORKFLOW_ID`; N
+workflows would mean a mapping in the attestor and a registration step per broker, and onboarding a
+broker would stop being a config change.
 
 ---
 
@@ -223,6 +470,21 @@ uint256 ROLE_ELIGIBLE_SWAP      = 1 << 64;
 uint256 ROLE_ELIGIBLE_LIQUIDITY = 1 << 68;
 ```
 
+### Canopy's own constants [new Sep 6]
+
+| | Value | |
+|---|---|---|
+| ENS text record key | `canopy:policy` | set on issuer and broker names |
+| record value, now | `keccak256:0x…` | hash of the canonical policy JSON |
+| record value, later | `ipfs://…` | the broker-hosted upgrade; workflow switches on the prefix |
+| broker registry salt | `keccak256("canopy.broker.v1.", issuerLabel, brokerLabel)` | **must include the issuer** — see Day 3 |
+| address-book key | `registry_<issuer>_<broker>` | **must include the issuer** — see Day 3 |
+| policy key | `"<issuerLabel>/<brokerLabel>"`, `"<issuerLabel>/_default"` | label path, not address |
+
+**`PermissionedResolverImpl` (`0xa9d3814a…`) moves from "listed" to "used" [new Sep 6].** We set no
+resolver on any name until now. ⚠️ **Unverified:** whether it is shared or needs a proxy per name.
+Check on Day 3 before the text-record write goes into the script.
+
 ### Live registrar values — read from Sepolia, Sep 5
 
 | Constant | Value | |
@@ -256,17 +518,18 @@ Sep 5   A: vendor deps           B: permissioned test token ─────┐
  D1+2   A: checker + mock tests  B: adapter + pool + flat swap    │
         A: Gate 1 gas ✅                                          │
           │                                                      │
-Sep 6   A: live ENS hierarchy    A: real checker ◄─ needs token ─┘
-  D3      │                      B: Gate 5 cre init  ────────────┐
+Sep 6   A: live ENS hierarchy    A: 2 checkers ◄─ needs token ────┘
+  D3      A: platform+2 issuers  B: Gate 5 cre init  ────────────┐
           │                      B: console skeleton             │
           │                                                      │
 Sep 7   A: attestor + registrar  B: CRE workflow ◄───── needs Gate 5
   D4      └──────────┬───────────────────┘
                      ▼  first full integration — CRE → mint → checker
-Sep 8   A: expiry/adversarial    B: REJECT path + brokerB
-Sep 9   A: swap + liquidity      B: console v1
-                     ▼  full user story on Sepolia
-Sep 10–11  benchmarks, docs, retests
+Sep 8   A: runner + cascade tests   B: REJECT path + SECOND POOL
+Sep 9   A: harden the module        B: console v1
+                     ▼  full user story on Sepolia, both issuers
+Sep 10     A: benchmarks   B: polish + policy hash (cuttable)
+Sep 11     docs, adversarial retests
 Sep 12     video + submission
 Sep 13     submit + buffer
 ```
@@ -274,8 +537,9 @@ Sep 13     submit + buffer
 **Hard dependencies to protect:**
 - ~~**MockUSDC blocks Sep 6.**~~ **Retired Sep 5.** `MockUSDC.mint(address,uint256)` at `0xcbfd80f7…` is **permissionless** — verified by simulating it from two unrelated addresses. Builder A self-serves; this is no longer a cross-track dependency, and it was the hardest one in the plan.
 - **Gate 5 blocks Sep 7.** Moved off Sep 5 because Builder B cannot fit it alongside the pool work. It now has a hard deadline of end of Sep 6, with nothing behind it.
-- **Builder B's permissioned token blocks the *real* checker deployment.** `ENSAllowlistChecker.PERMISSIONED_TOKEN` is immutable, so the production checker cannot be deployed until that address exists. Smaller than the dependency it replaces: Sep 6's verification runs against a throwaway checker bound to any address, so nothing is blocked in the meantime.
+- **Builder B's permissioned token blocks the *real* checker deployment.** `ENSAllowlistChecker.PERMISSIONED_TOKEN` is immutable, so the production checker cannot be deployed until that address exists. Smaller than the dependency it replaces: Sep 6's verification runs against a throwaway checker bound to any address, so nothing is blocked in the meantime. **[changed Sep 6] There are now two of these — one token per issuer, so two checkers.**
 - **Sep 7 is the first real integration.** Both tracks must land. Neither builder starts Sep 7 work before their Sep 6 deliverable is green.
+- **The second pool lands Sep 8 [new Sep 6].** It goes there because Sep 6 (Gate 5) and Sep 7 (CRE) are the two days with no slack, and Sep 8 is Builder B's lightest. ⚠️ **Ask today:** was the Sep 5 pool sequence a *parameterized script* or manual `cast` calls? A script makes pool 2 a re-run with new arguments — about an hour, since every trap in that sequence is already known. Manual makes it a re-do. If it was manual, parameterizing it costs an hour today and saves most of Sep 8; discovering that on Sep 8 is the bad version.
 
 ⚠️ **The buffer is spent.** Compressing Days 1–2 into today puts the schedule back on its original dates from Sep 6, but removes the slack that absorbed a bad day. From here, a slipped day pushes everything. The first place to buy time back is Sep 10–11 (benchmarks and polish), not Sep 7.
 
@@ -296,7 +560,7 @@ Sep 13     submit + buffer
 | **P0** | Vendor + verify dependencies | 🅰️ | Blocks all Solidity |
 | **P1** | Adapter → pool → flat swap | 🅱️ | Day 6 depends on the pool existing |
 | **P1** | `ENSAllowlistChecker` + mocked tests | 🅰️ | Day 3 validates against it |
-| ~~P2~~ | Gate 1 gas measurement | 🅰️ | ✅ **Done Sep 5** — 3-hop passes with headroom; hierarchy stays 3-level |
+| ~~P2~~ | Gate 1 gas measurement | 🅰️ | ✅ **Done Sep 5** — 3-hop passes with headroom. The Sep 6 model change does not add a hop; confirm and move on |
 | **P3** | ~~Gate 5 (`cre init`)~~ | 🅱️ | **Moved to Sep 6** — see below |
 
 **Gate 5 has moved to Day 3.** Builder B cannot realistically do MockUSDC, the whole adapter/pool/swap sequence, *and* CRE tooling in one day. Day 3's console skeleton is the lightest B task in the schedule, so Gate 5 goes there. CRE work proper doesn't begin until Day 4, so this costs nothing — but it does mean **Gate 5 must be green by end of Sep 6**, with no further slack.
@@ -352,6 +616,9 @@ checklist calls for no hard-coded values.
 The walk must **arrive** at `ROOT_ANCHOR`; a null parent, a wrong terminus or more than `MAX_HOPS`
 all deny. See Day 3 step 4 for why that is load-bearing.
 
+**[changed Sep 6]** Arriving is now necessary but not sufficient — the walk must also **pass
+through** the checker's `ISSUER_REGISTRY`. See "Cross-issuer isolation".
+
 `contracts/src/checker/IssuerAllowlistCheckerFlat.sol` — the flat baseline, also written Sep 5 so
 Builder B is not blocked on it for adapter creation. It lives in Builder A's directory per the
 ownership table; Builder B deploys it.
@@ -366,7 +633,12 @@ ownership table; Builder B deploys it.
 demo. That retires risk #19: all 8 vendored sponsor sources are byte-identical to the copies this
 spec was written against.
 
-**3. 🎯 Gate 1 — hierarchy walk gas — ✅ CLOSED Sep 5. Keep the 3-level hierarchy.**
+**3. 🎯 Gate 1 — hierarchy walk gas — ✅ CLOSED Sep 5.**
+
+> **[Sep 6] Still closed after the model change.** The tree gained a level, but `ROOT_ANCHOR` moved
+> from `.eth` to the platform registry, so the walk is the same two ancestor checks and the numbers
+> below stand. Re-run `Gate1HierarchyGas.t.sol` against the 4-level tree to confirm rather than to
+> discover.
 
 Measured against the **real** `PermissionedRegistry`, not a mock. Three checkers share one hierarchy
 and differ only in `ROOT_ANCHOR`, which isolates the marginal cost of a hop from the fixed cost of
@@ -438,7 +710,9 @@ Record in the README: the Gate 1 gas number, pool + adapter addresses, the permi
 
 # Sep 6 (Sat) — Day 3: real ENSv2 wiring
 
-**Objective:** a real three-level hierarchy exists on Sepolia and the checker returns correct flags walking it.
+**Objective:** a real **four-level** hierarchy exists on Sepolia — platform, two issuers, brokers,
+investors — and **each issuer's checker** returns correct flags walking it, including denying the
+other issuer's investors.
 
 ### 🅰️ Builder A — the hierarchy
 
@@ -472,7 +746,12 @@ is the registrar's floor and applies *only* to the parent; subnames have no mini
 
 Then build the hierarchy — note subname registration is **the other call**, with an absolute expiry, no payment and no commit–reveal:
 
-1. Deploy `IssuerRootRegistry` (a `UserRegistry`) via `VerifiableFactory` (`0x894bc9cc…`)
+> **[changed Sep 6] The tree is now four levels.** Steps 1–4 build the platform root, step 5 is new
+> and builds the issuers, and steps 6–8 repeat per issuer instead of once. The script phase list
+> becomes `commitParent() → registerParent() → buildIssuers() → buildHierarchy() → deployCheckers()`.
+
+1. Deploy `PlatformRootRegistry` (a `UserRegistry`) via `VerifiableFactory` (`0x894bc9cc…`)
+   — **renamed from `IssuerRootRegistry`**, which now means something else
 
 2. **Initialize it through `deployProxy`'s third argument.** The deployed implementation takes an
    **array of grants**, not a single account and bitmap:
@@ -493,49 +772,98 @@ Then build the hierarchy — note subname registration is **the other call**, wi
    separate `grantRootRoles` call on Day 4. That is one fewer transaction and it sidesteps the
    `_ADMIN` trap below at the one place you were most likely to hit it.
 
+   **[new Sep 6] Do this on every *issuer* registry too, not only broker registries.** Nothing this
+   week mints into an issuer registry — brokers are registered by their issuer directly. Grant it
+   anyway: it is one array entry, and it means any later need to mint under an issuer avoids
+   `grantRootRoles` and its `_ADMIN` variant entirely. The trap below is the reason; a grant you
+   never use costs nothing, and a grant you need after deployment costs an afternoon.
+
 3. `setSubregistry(...)` on the parent to wire the parent → child pointer
 
 4. **`setParent(parentRegistry, label)` on the child.** This is a *separate call* — `setSubregistry`
    does **not** wire the reverse pointer, and it is not optional.
 
    `ENSAllowlistChecker` walks **upward** from the investor's leaf and must terminate at
-   `ROOT_ANCHOR` (the `.eth` registry). A registry wired downward but never upward reports *no
+   `ROOT_ANCHOR` (the platform registry). A registry wired downward but never upward reports *no
    parent at all*, the walk stops early, and the checker denies everything. Miss this and it looks
    exactly like a broken checker. Requires `ROLE_SET_PARENT` on the child's root.
 
-5. Register `brokerA` — expiry is **absolute** and there is no minimum and no clamp to the parent's
-   expiry; only `CannotSetPastExpiry` applies.
+5. **[new Sep 6] Register each issuer under the platform root**, then deploy each an
+   `IssuerRegistry` and wire **both** `setSubregistry` and `setParent`. Structurally identical to
+   step 6 below, one level up — same call, no commit–reveal, no payment.
 
-   **Make the expiry a script parameter, not a constant.** The ~10-minute expiry is for *filming
-   only*. Set it on Sep 6 and `brokerA` is dead for the rest of the build, taking every downstream
-   test with it. Use ~30 days for development and pass the short value only when recording.
+   Give issuers a **long** expiry. An issuer lapsing cascades to every broker and every investor
+   beneath them, which is a bigger event than the one we are filming and not one we want by
+   accident.
 
-6. Deploy `BrokerARegistry`, wire under `brokerA` — **both** `setSubregistry` and `setParent`
+6. Register each broker **in its issuer's registry** — expiry is **absolute** and there is no
+   minimum and no clamp to the parent's expiry; only `CannotSetPastExpiry` applies.
 
-7. Register **both** investors in `BrokerARegistry` — the tier split needs two:
+   Then deploy that broker a `BrokerRegistry` and wire **both** `setSubregistry` and `setParent`.
 
-   | Name | Persona | Roles |
-   |---|---|---|
-   | `alice` | retail | `ROLE_ELIGIBLE_SWAP` |
-   | `mm` | market maker | `ROLE_ELIGIBLE_SWAP \| ROLE_ELIGIBLE_LIQUIDITY` |
+   Also grant the broker `ROLE_SET_RESOLVER` (`1<<24`) **scoped to their own name's resource** in
+   the issuer's registry, so the policy pointer is theirs to update and not the issuer's. Write the
+   `canopy:policy` text record if `policyHash` is present in the config; skip it silently if not, so
+   the script keeps working before Builder B has authored any policies.
 
-   `mm` was previously only ever created inside a mocked Foundry test, while Day 6 assumed it live on
-   Sepolia. Both go under the *same* broker — that is what makes beat 8 land, since one expiry takes
-   out both tiers at once.
+   **Make the expiry a per-broker script parameter, not a global constant.** The ~10-minute expiry is
+   for *filming only*, and a global short TTL expires every broker at once — which on camera looks
+   like a global kill switch rather than a scoped cascade, destroying beat 13. Use ~30 days for
+   development and pass the short value only for the one broker being filmed.
+
+   ⚠️ **Two collisions that only appear once a broker label repeats under two issuers** — which is
+   exactly what `prime` does, so this is not hypothetical:
+
+   - **The `VerifiableFactory` salt must include the issuer.** Proxy addresses are deterministic in
+     `(msg.sender, salt)`. With a salt over the broker label alone, `prime` under Acme and `prime`
+     under Zenith resolve to the **same proxy address** — and the script's idempotency check (code at
+     the predicted address → skip) would then hand Zenith's Prime the registry belonging to Acme's
+     Prime. Acme's expiry would silently cut off Zenith's investors. Salt over
+     `(issuerLabel, brokerLabel)`.
+   - **The address-book key must include the issuer.** `registry_<broker>` is written twice; use
+     `registry_<issuer>_<broker>`.
+
+7. Register the bootstrap investors in each broker's registry — the tier split needs two under one
+   broker, and beat 13 needs a second issuer's book to survive:
+
+   | Name | Under | Persona | Roles |
+   |---|---|---|---|
+   | `alice` | `prime.acme` | retail | `ROLE_ELIGIBLE_SWAP` |
+   | `mm` | `prime.acme` | market maker | `ROLE_ELIGIBLE_SWAP \| ROLE_ELIGIBLE_LIQUIDITY` |
+   | `bob` | `prime.zenith` | retail | `ROLE_ELIGIBLE_SWAP` |
+   | `mm2` | `prime.zenith` | market maker, seeds pool 2 | `ROLE_ELIGIBLE_SWAP \| ROLE_ELIGIBLE_LIQUIDITY` |
+
+   `alice` and `mm` go under the *same* broker — that is what makes beat 11 land, since one expiry
+   takes out both tiers at once. `bob` sits under the *same broker under a different issuer*, which
+   is what makes beat 13 land.
 
    Register them to the addresses Builder B's wallets will actually sign from (interface contract
    item 5). A subname is not trivially movable afterwards.
 
-8. **Deploy `ENSAllowlistChecker` and record `alice`'s path**, or the end-of-day check cannot run.
+   **[changed Sep 6]** The script's "every investor needs a distinct address" guard becomes
+   **distinct within an issuer**. One wallet holding a name under both issuers is now correct, and
+   the old global guard would reject it.
+
+8. **Deploy one `ENSAllowlistChecker` per issuer and record every bootstrap investor's path**, or
+   the end-of-day check cannot run.
 
    `recordPath` is `onlyAttestor` and `MintAttestor` does not exist until Day 4, so deploy with
    `attestor` set to the deployer EOA, record manually, and re-point `setAttestor` at `MintAttestor`
    tomorrow — which is why it is owner-settable.
 
-   `ROOT_ANCHOR` = `ETHRegistry 0x1d78834d…`. `PERMISSIONED_TOKEN` is **immutable**, so the real
-   checker needs Builder B's permissioned test token. If that address is not ready, verify with a
-   throwaway checker bound to any address and pass the same address to `checkAllowlist`; that tests
-   the walk without waiting.
+   **[changed Sep 6] `ROOT_ANCHOR` is the platform registry, not `ETHRegistry`.** Anchoring at
+   `.eth` would add a fourth hop purely to check that `canopy.eth` — our own name, which we renew —
+   has not lapsed. Anchored at the platform registry the walk is still two ancestor checks (the
+   broker's name in the issuer's registry, the issuer's name in the platform registry), so **the
+   issuer's expiry still cascades and Gate 1's number does not move**.
+
+   **[new Sep 6] `ISSUER_REGISTRY` is a second immutable**, and the walk must pass through it. See
+   "Cross-issuer isolation" — without it, every issuer's checker admits every other issuer's
+   investors.
+
+   `PERMISSIONED_TOKEN` is **immutable** and there are now two of them, one per issuer. If Builder
+   B's addresses are not ready, verify with throwaway checkers bound to any address and pass the same
+   address to `checkAllowlist`; that tests the walk without waiting.
 
 **Trap:** `grantRootRoles` requires the `_ADMIN` variant of the role being granted. Still applies to
 anything granted *after* deployment — getting it wrong is fatal to the registration path and subtle
@@ -546,7 +874,18 @@ Write `script/DeployIssuerHierarchy.s.sol` so this is repeatable and idempotent.
 **Idempotency has a concrete handle:** a `VerifiableFactory` proxy address is deterministic in
 `(msg.sender, salt)` — the same deployer and salt always return the same address, and a different
 sender with the same salt returns a different one. Have the script check for code at the predicted
-address and skip redeployment rather than minting a second registry each run.
+address and skip redeployment rather than minting a second registry each run. **See step 6 for why
+that same determinism is a hazard once a broker label repeats.**
+
+**Config shape.** `script/hierarchy.json` nests one level deeper: `issuers[] → brokers[] →
+investors[]`, with `ttl` on issuers and brokers and an optional `policyHash` per broker and per
+issuer. A broker onboarded by two issuers appears as two entries with the same `label` under
+different issuers — that is the intended way to express it.
+
+**Fork rehearsal gains three cases** in `test/fork/HierarchyRehearsal.t.sol`, all against live
+contracts: an issuer lapse cascading to every broker beneath it while the other issuer is untouched;
+a broker dropped by one issuer keeping their book under the other (beat 13); and an investor under
+one issuer denied by the other issuer's checker (beat 9).
 
 ### 🅱️ Builder B — Gate 5, then console skeleton
 
@@ -569,7 +908,10 @@ Submit the beta access request in Chainlink Discord as a nice-to-have. **It is n
 Next.js app:
 - Privy embedded wallet sign-in (**console auth only** — no Server Wallets, no policy engine; that's explicitly out of scope)
 - "Submit application" form → backend endpoint stub
-- The endpoint emits `ApplicationSubmitted(applicationId, wallet, broker, requestedTier)` — see interface contract item 2. **No PII in the event**, since triggers run on Workflow DON nodes outside the enclave. The form must therefore ask *which broker* the applicant is applying through; that is an input, not something CRE decides
+- The endpoint emits `ApplicationSubmitted(applicationId, wallet, issuer, broker, brokerPath, requestedTier)` — see interface contract item 2. **No PII in the event**, since triggers run on Workflow DON nodes outside the enclave. The form must therefore ask **which issuer, and which broker under them** — both are inputs, not something CRE decides
+- **[new Sep 6] The form is a two-step select:** pick the issuer, then pick from the brokers that
+  issuer has onboarded. The same broker appearing under two issuers is expected, and picking it
+  under Acme is a different application from picking it under Zenith
 
 Do **not** start `lib/uniswap.ts` / `lib/ensv2.ts`. Those are superseded by
 `frontend/lib/canopy.ts`, which Builder A writes on Day 5 once every piece of the flow exists. Two
@@ -581,9 +923,18 @@ half-written contract layers is how the runner and the console drift apart.
 
 ### 🔀 Sync — end of day
 
-**Done when:** the real Sepolia hierarchy exists, `setParent` is wired on every child registry, and a deployed `ENSAllowlistChecker` walking it returns `SWAP_ALLOWED` for `alice` and `NONE` for an unknown address.
+**Done when:** the real Sepolia hierarchy exists four levels deep, `setParent` is wired on every child
+registry, and **each issuer's** deployed `ENSAllowlistChecker` returns `SWAP_ALLOWED` for its own
+investor, `NONE` for an unknown address, **and `NONE` for the other issuer's investor.** That last
+assertion is beat 9 and the reason the model changed — do not call the day done without it.
 
-**Confirm before starting Day 4:** whether the checker is bound to Builder B's real permissioned token or still a throwaway. If it is a throwaway, the real one must be deployed and re-pointed before the Day 4 integration, since `PERMISSIONED_TOKEN` is immutable.
+**Confirm before starting Day 4:**
+- whether each checker is bound to Builder B's real permissioned token or still a throwaway. If a
+  throwaway, the real one must be deployed and re-pointed before the Day 4 integration, since
+  `PERMISSIONED_TOKEN` is immutable — and there are now two.
+- **whether Builder B's Sep 5 pool sequence was a parameterized script.** If not, parameterize it
+  today. See "Hard dependencies".
+- Gate 5's two new answers (enclave EVM reads, fetch determinism).
 
 ---
 
@@ -602,25 +953,43 @@ function _processReport(bytes calldata metadata, bytes calldata report) internal
     (bytes32 workflowId, , ) = _decodeMetadata(metadata);
     if (workflowId != EXPECTED_WORKFLOW_ID) revert UnexpectedWorkflow(workflowId);
 
-    (address wallet, bytes32 labelBytes, address brokerRegistry,
+    (uint8 kind, address subject, bytes32 labelBytes, address parentRegistry,
      uint256 roleBitmap, uint64 expiry, bool approved)
-        = abi.decode(report, (address, bytes32, address, uint256, uint64, bool));
+        = abi.decode(report, (uint8, address, bytes32, address, uint256, uint64, bool));
 
-    if (!approved) return;   // REJECT is a no-op on-chain
+    if (!approved) return;          // REJECT is a no-op on-chain
+    if (kind != KIND_INVESTOR) revert UnsupportedKind(kind);   // see Day 7
 
     string memory label = LibLabelBytes.toString(labelBytes);
-    REGISTRAR.registerFromAttestation(wallet, label, brokerRegistry, roleBitmap, expiry);
-    CHECKER.recordPath(wallet, brokerRegistry, LibLabel.id(label));
+    REGISTRAR.registerFromAttestation(subject, label, parentRegistry, roleBitmap, expiry);
+
+    // [new Sep 6] Which issuer's checker? Derive it on-chain rather than trusting the report:
+    // parentRegistry is the broker's registry, so one getParent() hop gives the issuer's.
+    (IRegistry issuerRegistry, ) = IRegistry(parentRegistry).getParent();
+    ENSAllowlistChecker checker = checkerOf[address(issuerRegistry)];
+    if (address(checker) == address(0)) revert NoCheckerForIssuer(address(issuerRegistry));
+    checker.recordPath(subject, parentRegistry, LibLabel.id(label));
 }
 ```
 
-**Two things worth understanding, not just copying:**
+**Three things worth understanding, not just copying:**
 - The workflow-ID check is **ours to add** — `ReceiverTemplate` decodes metadata but doesn't validate it. Without this guard, *any* workflow routed through the same forwarder could mint subnames. This is the security-relevant line in the contract.
 - `labelBytes` carries the **label itself**, right-padded into `bytes32` — not its hash. `register()` needs a `string` and a hash can't be reversed, but `string` is dynamic and CRE reports are flat. `LibLabelBytes.toString` is ~10 lines: trim trailing zero bytes. This caps labels at 32 bytes — fine for the demo, worth a line in `FEEDBACK.md`.
+- **[new Sep 6] The checker is derived from the chain, not read from the report.** `checkerOf` is an
+  owner-set `mapping(address issuerRegistry => ENSAllowlistChecker)`, and the issuer registry comes
+  from `getParent()` on the registry the name was minted into. A compromised workflow can therefore
+  choose *what to mint*, but not *which issuer's pool the eligibility lands in*. Passing the checker
+  address in the report would give that away for nothing.
+
+**`kind` is decoded and rejected unless it is `KIND_INVESTOR`.** Nothing else is ever emitted — this
+is a decode guard, not a feature flag. See interface contract item 1.
 
 **`contracts/src/registrar/SubnameRegistrar.sol`** — flat params matching the report, `onlyAttestor`, calling `IPermissionedRegistry.register` into the broker's registry.
 
-Then: deploy the attestor and registrar, and point the **existing** checker (deployed Sep 6) at the attestor with `setAttestor` — replacing the deployer EOA it was initialized with. Redeploy the checker only if it is still bound to a throwaway token.
+Then: deploy the attestor and registrar, register **every** issuer's checker in `checkerOf`, and
+point **each existing checker** (deployed Sep 6) at the attestor with `setAttestor` — replacing the
+deployer EOA it was initialized with. Redeploy a checker only if it is still bound to a throwaway
+token.
 
 `SubnameRegistrar` needs `ROLE_REGISTRAR` on each broker registry. If Sep 6's grant array already included it, there is nothing to do; otherwise grant it via `grantRootRoles`, which needs the `_ADMIN` variant.
 
@@ -646,6 +1015,20 @@ const secrets = runtime.getSecrets([
 > CRE docs are explicit: *"your handler's source code and compiled binary are not confidential just because part of its logic runs inside an enclave."* Our repo must be public to win the prize. If the thresholds are written as TypeScript, the "compliance without leaking rules" claim is **false** — which is the CRE prize's entire premise (risk #20).
 > `main.ts` holds a generic evaluator. All discriminating values — score thresholds, tier boundaries, jurisdictions — come from `ELIGIBILITY_RULEBOOK`.
 
+**[new Sep 6] `ELIGIBILITY_RULEBOOK` is now a keyed map, not one policy.** Resolve
+`book[brokerPath]` over `book["<issuer>/_default"]`, and combine them with the tighten-only rules in
+"Where policy lives" — a broker may raise a threshold, narrow an allowlist, add a denial or shorten
+an expiry, never the reverse. `effective.expiryDays` becomes the report's `expiry`, which is how
+per-broker policy becomes visible on-chain.
+
+**One workflow, not one per broker.** `MintAttestor` gates on a single `EXPECTED_WORKFLOW_ID`, so N
+workflows would mean a mapping in the attestor and a registration step per broker.
+
+**Policy-hash verification is optional today, scheduled for Day 7.** If it fits, verify
+`keccak(canonical(policy))` against the `canopy:policy` text record before evaluating; the comparison
+uses only public values, so it can sit outside the enclave. If Day 4 is tight, skip it — reading the
+keyed rulebook is the part Day 4 needs.
+
 Crossing back out:
 ```ts
 const donRuntime = runtime.usingTheDons()   // everything past here is NOT confidential
@@ -656,16 +1039,22 @@ evmClient.writeReport(donRuntime, { receiver: mintAttestorAddress, report, gasCo
 
 Report payload — flat tuple, **no dynamic arrays**:
 ```
-address wallet, bytes32 labelBytes, address brokerRegistry, uint256 roleBitmap, uint64 expiry, bool approved
+uint8 kind, address subject, bytes32 labelBytes, address parentRegistry,
+uint256 roleBitmap, uint64 expiry, bool approved
 ```
+`kind` is always `0` this week. See interface contract item 1 for why it is carried anyway.
 
 Also build `cre/kyc-mock/server.ts` — deterministic responses keyed by `applicationId` so the demo is repeatable.
+
+**[new Sep 6] Publish `cre/policy-schema.md`** — the field list and the combination rules, in the
+public repo. It is the artifact that makes the confidentiality claim checkable: a judge reads exactly
+what a policy can express and confirms none of the values are in the code.
 
 Run everything with `--broadcast`.
 
 ### 🔀 Sync — end of day
 
-**Done when this full chain works:** `cre workflow simulate --broadcast` → APPROVE verdict → forwarder tx on Sepolia → `MintAttestor.onReport` → `SubnameRegistrar` mints the subname → `ENSAllowlistChecker.checkAllowlist(alice, token)` returns `SWAP_ALLOWED`.
+**Done when this full chain works:** `cre workflow simulate --broadcast` → APPROVE verdict → forwarder tx on Sepolia → `MintAttestor.onReport` → `SubnameRegistrar` mints the subname → `acmeChecker.checkAllowlist(alice, acmeToken)` returns `SWAP_ALLOWED` **and `zenithChecker.checkAllowlist(alice, zenithToken)` returns `NONE`.**
 
 If the chain breaks, debug from the on-chain end backwards — the forwarder tx hash in the CRE output tells you whether the problem is before or after the chain boundary.
 
@@ -673,7 +1062,7 @@ If the chain breaks, debug from the on-chain end backwards — the forwarder tx 
 
 # Sep 8 (Mon) — Day 5: the whole flow in the terminal
 
-**Objective:** all eleven beats run start to finish from one command, on live Sepolia, with no
+**Objective:** all fifteen beats run start to finish from one command, on live Sepolia, with no
 manual steps. Today is where the demo stops being a plan.
 
 ### 🅰️ Builder A — `lib/canopy.ts` and the runner
@@ -684,13 +1073,19 @@ now exists; what is missing is one place that knows how to call them.
 `frontend/lib/canopy.ts` — the shared module, plain viem, no React:
 
 ```ts
-apply(wallet, tier)                  // beats 1-3: emits ApplicationSubmitted
-eligibilityOf(wallet)                // the two badges, via checkAllowlist
-hierarchyOf(wallet)                  // the walk: leaf -> broker -> issuer -> .eth, with expiries
-swap(account, amountIn)              // permissioned Universal Router  0x54C707...
-addLiquidity(account, params)        // PermissionedPositionManager    0xf99D55...
-removeLiquidity(account, tokenId)    // beat 10 — must work after the lapse
+apply(wallet, issuer, broker, tier)      // beats 1-4: emits ApplicationSubmitted
+eligibilityOf(wallet, issuer)            // the two badges, via that issuer's checker
+hierarchyOf(wallet, issuer)              // leaf -> broker -> issuer -> platform, with expiries
+issuersOf(wallet)                        // [new Sep 6] every issuer this wallet is eligible under
+swap(account, issuer, amountIn)          // permissioned Universal Router  0x54C707...
+addLiquidity(account, issuer, params)    // PermissionedPositionManager    0xf99D55...
+removeLiquidity(account, issuer, tokenId) // beat 14 — must work after the lapse
 ```
+
+**[changed Sep 6] Every function takes an issuer.** There is one adapter, one pool, one token and one
+checker per issuer, so a call with no issuer is ambiguous — and the ambiguity resolves silently to
+whichever one is listed first, which is the worst kind of bug to have on camera. `issuersOf` is what
+the console needs to show a wallet that is eligible under one issuer and not another (beat 9).
 
 Two things the module must get right, because they are the errors that cost hours:
 
@@ -700,33 +1095,63 @@ Two things the module must get right, because they are the errors that cost hour
 - **caller == recipient** for liquidity. `addLiquidity()` takes no recipient parameter, by design.
 
 `scripts/e2e.ts` — the runner. Calls the module in beat order, asserts each outcome (including the
-two that must *revert*), and prints a legible transcript. This is the acceptance test and the
-rehearsal for the video.
+**four** that must *revert* — 8, 9, 12, 15), and prints a legible transcript. This is the acceptance
+test and the rehearsal for the video.
 
-It must be re-runnable: `--reset-broker` re-arms beat 8, and everything else is idempotent.
+It must be re-runnable: `--reset-broker` re-arms beat 11, and everything else is idempotent.
+
+**[new Sep 6] The runner loops issuers.** Beats 9, 10 and 13 all compare one issuer against the
+other, so the transcript should print a per-issuer eligibility matrix — wallet × issuer × flag — at
+the top and again after the lapse. That table is the clearest single artifact the project produces,
+and it is worth a screenshot in the README.
 
 ### 🅰️ Builder A — the tests that prove the thesis
 
 `test/ExpiryCascade.t.sol`:
-- Register `mm.brokerA` with **both** roles; assert bit assembly returns `SWAP_ALLOWED | LIQUIDITY_ALLOWED`
-- Expire `brokerA` → assert **both** `alice` and `mm` return `NONE`. This is the money shot.
+- Register `mm` under `prime.acme` with **both** roles; assert bit assembly returns `SWAP_ALLOWED | LIQUIDITY_ALLOWED`
+- Expire Acme's `prime` → assert **both** `alice` and `mm` return `NONE`. This is the money shot.
 - Expire `alice` only → assert `mm` still works
+- **[new Sep 6] Containment:** expire Acme's `prime` → assert `bob`, under Zenith's `prime`, is unaffected. Beat 13.
+- **[new Sep 6] Issuer cascade:** expire `acme` itself → assert every broker and investor beneath it returns `NONE`, and Zenith's are untouched
 - **Re-registration test:** expire a name, re-register it, assert the old role grants no longer satisfy `checkAllowlist`. This proves the `eacVersionId` story — a lapsed broker cannot resurrect their book by re-registering. Cheapest possible proof of the strongest claim in the pitch.
 
 `test/AdversarialPath.t.sol`:
 - Malicious/forged path → must return `NONE` or revert, never grant
 - Path with a registry that isn't a real registry
 - `recordPath` called by a non-attestor → reverts
+- **[new Sep 6] Cross-issuer:** a leaf legitimately registered under Zenith, recorded into Acme's checker, must return `NONE` — the walk reaches the platform root but never passes through `ISSUER_REGISTRY`. This is the test that would have caught the isolation hole, and it is the one that fails *open* if the guard is ever removed.
 
-### 🅱️ Builder B — REJECT path + second broker
+### 🅱️ Builder B — REJECT path, per-broker rejection, and **the second pool**
 
 - Workflow REJECT branch: score below threshold → either no `writeReport`, or a REJECT verdict that `MintAttestor` filters (`if (!approved) return;`). Test both.
-- Register `brokerB.issuer.eth` end-to-end through the full CRE flow, with `bob` under it holding `ROLE_ELIGIBLE_SWAP`. This proves the hierarchy generalises past one broker.
+- **[new Sep 6] Beat 3 — the per-broker rejection.** A borderline applicant who passes under `prime`
+  and fails under `delta`, same issuer, same engine, different policy. This is what makes
+  "per-broker criteria" a demonstrated mechanism rather than a described one, and it costs one extra
+  entry in the rulebook map.
+- Onboard `bob` under **Zenith's** `prime` end-to-end through the full CRE flow, holding
+  `ROLE_ELIGIBLE_SWAP`. This proves the hierarchy generalises past one broker *and* sets up beats 10
+  and 13.
+
+**[new Sep 6] The second pool — Zenith's.** Repeat the Sep 5 sequence with new arguments: a second
+permissioned test token, `createPermissionsAdapter`, allowlist + `depositForVerification(1)`, all
+four wrappers and the hook, create the pool, `updateSwappingEnabled(true)`.
+
+It lands today because Sep 6 and Sep 7 have no slack and today is the lightest day. **It should be
+about an hour if Sep 5's sequence was a parameterized script** — every trap in it is already known.
+If it was manual `cast` calls, this is most of a day; that is why the "parameterize it" question is
+on Sep 6's checklist rather than here.
+
+Then seed it with depth: `mm2`, Zenith's market maker, adds liquidity. Beat 10 needs somewhere for
+`bob` to trade.
+
+**Do not share a token between the two pools.** The pool *is* the issuer's product — Acme issues one
+asset, Zenith another. They share the rails, not the book.
 
 ### 🔀 Sync — end of day
 
-**Done when:** `scripts/e2e.ts` runs all eleven beats on live Sepolia, start to finish, no manual
-steps — including the two that must revert (7 and 9) and the withdrawal that must still succeed (10).
+**Done when:** `scripts/e2e.ts` runs all fifteen beats on live Sepolia, start to finish, no manual
+steps — including the four that must revert (8, 9, 12, 15), the withdrawal that must still succeed
+(14), and the two that carry the new model: **9, isolation, and 13, containment.**
 
 Everything the console needs now exists as a function. Tomorrow is wiring, not discovery. If the
 runner is not green tonight, do not start the UI — building presentation over an unproven flow is how
@@ -749,11 +1174,12 @@ about making them usable from a browser rather than a terminal.
   panic. Beats 7 and 9 are *revert messages* — they have to be legible on camera.
 - Support Builder B through the wiring. Day 6 is the first day the two tracks share a module.
 
-**Beat 4 — the checker swap-over — is filmed today:**
+**Beat 5 — the checker swap-over — is filmed today:**
 ```solidity
-adapter.updateAllowListChecker(ensAllowlistChecker);
+acmeAdapter.updateAllowListChecker(acmeChecker);
 ```
-One transaction turns a flat permissioned pool into a hierarchical one.
+One transaction turns a flat permissioned pool into a hierarchical one. Zenith's adapter gets the
+same treatment off camera — filming it twice proves nothing new.
 
 **`mm` must mint to itself.** `LIQUIDITY_ALLOWED` is checked **twice against two different
 addresses**: the position manager checks the `recipient`, the hook's `beforeAddLiquidity` checks the
@@ -770,16 +1196,26 @@ Liquidity goes through `PermissionedPositionManager` (`0xf99D55…`), **not** th
 Every beat of the flow is now a UI affordance. The module already works — Day 5's runner proved it —
 so this is wiring buttons to functions, not writing contract calls.
 
-- Application form → `apply()` (beats 1–3)
-- Active brokers with **live expiry countdown** (beat 8)
+- **[new Sep 6] An issuer switcher at the top level.** Every view is scoped to one issuer, and the
+  switcher is what makes beats 9, 10 and 13 legible — the same wallet, the same broker, a different
+  issuer, a different answer.
+- Application form → `apply()`: pick issuer, then broker under that issuer, then tier (beats 1–4)
+- Active brokers per issuer with **live expiry countdown** (beat 11)
 - Investors per broker, role bits as two distinct badges (swap / liquidity)
-- **Swap** and **Add liquidity** buttons per investor → `swap()`, `addLiquidity()` (beats 5–7)
-- **Remove liquidity** for `mm` (beat 10)
-- Surface revert reasons verbatim — `Unauthorized` from the router *is* the demo (beats 7, 9)
+- **Swap** and **Add liquidity** buttons per investor → `swap()`, `addLiquidity()` (beats 6–8)
+- **Remove liquidity** for `mm` (beat 14)
+- Surface revert reasons verbatim — `Unauthorized` from the router *is* the demo (beats 8, 9, 12)
+- **[new Sep 6] A per-wallet eligibility matrix** — wallet × issuer × flag, straight from
+  `issuersOf()`. It is how a viewer sees at a glance that eligibility is issuer-scoped, and it is the
+  single view that changes most visibly at beat 11.
+- **[new Sep 6] Show each broker's policy hash and its `expiryDays`, never the criteria.** That is
+  the whole confidentiality claim rendered as a UI element: you can see *that* a broker has a policy
+  and that it is pinned to their name, and you cannot see what it says.
 
 **Poll `eligibilityOf()` on a short interval.** The chain does not push. If the badges only change on
 refresh, the judge watches you click at the exact moment we claim nothing is clicked. This is the
-single most important UI requirement in the build.
+single most important UI requirement in the build. **Poll both issuers** — beat 13 is Acme's badges
+going dark while Zenith's stay lit, and that only lands if both are live on screen at once.
 
 **There is no "trigger lapse" control.** Expiry is time passing; a button that forces it would be
 `unregister`, the revocation transaction we claim is unnecessary. Setup between takes is
@@ -788,11 +1224,11 @@ single most important UI requirement in the build.
 **Naming trap:** the pool's currency is the **adapter**; the wallet holds the **underlying**. Never a
 variable called just `token`. `lib/canopy.ts` keeps them distinct — do not flatten it in the UI.
 
-**Note:** the earlier plan hedged with an Anvil mirror because Sepolia can't be time-warped. That's no longer needed — `brokerA` is registered with a ~10-minute expiry and lapses for real. Build the countdown against the real chain.
+**Note:** the earlier plan hedged with an Anvil mirror because Sepolia can't be time-warped. That's no longer needed — Acme's `prime` is registered with a ~10-minute expiry and lapses for real. Build the countdown against the real chain. **Only that one name gets the short TTL**; every other broker keeps ~30 days, or the cascade looks global and beat 13 has nothing to show.
 
 ### 🔀 Sync — end of day
 
-**Done when:** the complete user story — application → CRE verdict → subname mint → swap → liquidity split → broker lapse → both cut off — executes on Sepolia.
+**Done when:** the complete user story — application → CRE verdict → subname mint → swap → liquidity split → broker lapse → both cut off, **with the other issuer's book visibly untouched** — executes on Sepolia, in the browser.
 
 ---
 
@@ -804,12 +1240,31 @@ variable called just `token`. `lib/canopy.ts` keeps them distinct — do not fla
 
 The interesting result is that our cost is **flat in the number of investors** — it's a function of hierarchy depth, not registry size — whereas the flat checker's storage grows linearly. Present it that way; it's the quantitative argument for the whole design.
 
+**[new Sep 6] Add a second axis: issuers.** The flat checker's storage grows with investors *and*
+must be duplicated per issuer; ours adds one immutable per issuer and no per-investor storage at all.
+Revoking a broker's book is one expiry in our design and O(investors) transactions in theirs —
+**per issuer**. The multi-issuer model makes the existing argument stronger, so say it with the new
+number rather than the old one.
+
+### 🅱️ **Policy-hash verification [new Sep 6] — ~1h, do it if the day allows**
+
+The workflow verifies `keccak(canonical(policy))` against the `canopy:policy` text record before
+evaluating, and the console shows the hash. This is the piece deferred off Day 4 because Day 4 is
+the day both tracks must land.
+
+It turns "each broker has their own criteria" from a description into something a judge can check,
+and it completes the attestation trail below — workflow ID, report hash, *and* the policy that
+verdict was made against.
+
+If the day is tight, cut it. Per-broker criteria still work without it; what is missing is the proof
+that we did not quietly rewrite a broker's rules.
+
 ### 🅱️ Builder B
 
 Console polish:
 - Two-tier investor view (retail vs MM) with the role bits visible
 - On-chain event stream: registrations + attestations
-- Attestation trail per subname: workflow ID + report hash, so a judge can verify the CRE provenance of any name
+- Attestation trail per subname: workflow ID + report hash **+ the policy hash in force at the time**, so a judge can verify the CRE provenance of any name *and* what it was judged against
 
 ---
 
@@ -819,6 +1274,16 @@ Console polish:
 
 - **Role-nybble collision test.** Assert our `1<<64` / `1<<68` grants do not trigger any `RegistryRolesLib` behaviour. The original values collided with `ROLE_REGISTER_RESERVED` and `ROLE_SET_PARENT`; this test is the regression guard.
 - **Token-regeneration test.** Mint → change a role (which bumps `tokenVersionId` and regenerates the token) → assert the checker still works, because we index by labelhash and never touch token IDs.
+- **[new Sep 6] Salt-collision regression.** Two issuers, one shared broker label; assert their
+  registries are at *different* addresses. Without an issuer in the salt they collide, and the
+  failure mode is that one issuer's expiry silently cuts off the other's investors.
+- **[new Sep 6] Policy clamp.** A broker policy attempting `minScore` below the issuer's floor, a
+  wider jurisdiction allowlist, or a higher `maxTier` — assert each is clamped to the issuer's value,
+  not applied. This is the compliance claim; an unclamped broker policy means a broker can approve
+  someone their issuer would reject.
+- **[new Sep 6] Optional hardening: an on-chain role clamp.** `MintAttestor` masks
+  `roleBitmap &= ceilingOf[parentRegistry]`, so even a compromised workflow cannot mint an MM under a
+  retail-only broker. Cheap, and it moves one compliance guarantee out of the enclave.
 
 ### 🅱️ Builder B
 
@@ -836,16 +1301,30 @@ Console polish:
 
 ### 🅰️ Builder A — the video (target 90s)
 
-Shot in the console. The eleven beats, trimmed to the five that carry the argument: `mm` adds
-liquidity ✓ → retail swaps ✓ → retail `addLiquidity` **reverts** ✗ → **broker name lapses, no
-transaction sent** → both investors cut off, swaps revert on-chain.
+Shot in the console. The fifteen beats, trimmed to the six that carry the argument:
+
+1. `mm` adds liquidity on Acme's pool ✓ (beat 6)
+2. retail swaps ✓ (beat 7)
+3. retail `addLiquidity` **reverts** ✗ (beat 8) — the tier split
+4. **Acme's `prime` lapses, no transaction sent** (beat 11)
+5. both its investors cut off, swaps revert on-chain (beat 12)
+6. **`bob` — same broker, different issuer — still trades** (beat 13) — containment
+
+**Beat 13 is the one the new model exists for**, and it costs about eight seconds: after the lapse,
+switch to Zenith and swap. One broker, dropped by one issuer, still operating for the other. Without
+it the video shows an expiry cascade; with it, it shows a *scoped* one.
 
 **The lapse must be one uncut shot** — badges live, nothing clicked, badges dark. An edit there is
-not evidence. Set `BROKER_TTL` so the countdown crosses zero while recording, and re-arm between
-takes with `deploy-hierarchy.sh --reset-broker` (off camera — it uses `unregister`).
+not evidence. Show both issuers on screen at once if the layout allows, so beat 5 and beat 6 are the
+same shot: Acme's column goes dark while Zenith's stays lit. Set the TTL for *only that broker* so
+the countdown crosses zero while recording, and re-arm between takes with
+`deploy-hierarchy.sh --reset-broker` (off camera — it uses `unregister`).
 
-If there is room, beat 10 is worth ten seconds: `mm` removes liquidity *after* being cut off. It
+If there is room, beat 14 is worth ten seconds: `mm` removes liquidity *after* being cut off. It
 answers the "have you trapped their funds" question before a judge has to ask it.
+
+Beat 9 (cross-issuer denial) is the one to cut first if time is short — beat 13 already demonstrates
+issuer scoping, and does it more vividly.
 
 **Two things to say out loud, because a knowledgeable judge is listening for them:**
 1. *"They can no longer trade or add exposure"* — **not** *"they're frozen."* Decreases and burns are never gated in the standard; withdrawal stays open by design. Naming this shows command of the spec rather than hiding a gap.
@@ -885,12 +1364,19 @@ Submit on the ETHGlobal portal. Buffer for last-minute fixes.
 
 From §10 of the master spec — we ship if all of the following are true by end of Sep 12:
 
-1. Adapter created via the live Sepolia factory; our checker, registrar and attestor deployed and verified
-2. Parent name, two brokers, and ≥3 investor subnames registered end-to-end through the CRE flow
+1. **Two** adapters created via the live Sepolia factory, one per issuer; our two checkers, registrar and attestor deployed and verified
+2. Platform name, **two issuers, a broker onboarded by both**, and ≥3 investor subnames registered end-to-end through the CRE flow
 3. A live Sepolia swap passing through the router → adapter → our checker → correct flag → executes
 4. A live `addLiquidity` rejected for a swap-only investor and accepted for an MM
-5. The money shot: broker name lapses, both investors cut off, no revocation transaction
-6. `FEEDBACK.md` with real observations
-7. Video ≤ 3 min, live demo link, public repo
+5. The money shot: broker name lapses, both its investors cut off, no revocation transaction
+6. **[new Sep 6] Containment:** the same broker's book under the *other* issuer keeps trading through that lapse
+7. **[new Sep 6] Isolation:** an investor eligible under one issuer is refused on-chain by the other issuer's pool
+8. `FEEDBACK.md` with real observations
+9. Video ≤ 3 min, live demo link, public repo
 
-**1–5 clear every listed prize requirement. 6–7 are the delivery.**
+**1–5 clear every listed prize requirement. 6–7 are what the multi-issuer model adds, and they are
+the two a judge will probe first. 8–9 are the delivery.**
+
+⚠️ **If the schedule slips, 6 and 7 are not the things to cut** — they are cheap (both are assertions
+the runner already makes) and they are the difference between a platform and a single-tenant demo
+with extra names in it. Cut the second *pool* before cutting these, and prove 7 with a read.
