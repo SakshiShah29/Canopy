@@ -1,0 +1,39 @@
+{
+  "chainId": 11155111,
+  "network": "sepolia",
+  "deployer": "0xcE1606F346726d8714985b680B84dD6959fb4186",
+  "canopy": {
+    "CanopyTestToken": "0x0B5Cd086f7A3eadc7419325a3d56Fe338465c920",
+    "IssuerAllowlistCheckerFlat": "0x2bd99Ec49bafea1E765f23Fc3bCaFdfaE86b3DB4",
+    "PermissionsAdapter": "0x83b0f98b15c8cDFDbf2C172FD141226f97C649d9"
+  },
+  "ens": {
+    "RootRegistry": "0xe7f0d5724f8337e3aa9a9910540341ff4273fed9",
+    "ETHRegistry": "0x1d78834d97c1d7b1a38c1dedbd1a287cfed3971e",
+    "ETHRegistrar": "0x7d1b7f586a62ac3f54b9a396849757814283270b",
+    "VerifiableFactory": "0x894bc9cc8ff1ad96b8a288c86a8c71d662c07780",
+    "UserRegistryImpl": "0x47b442d0cf617c41cabaff5f02f44dd1e5f72546",
+    "PermissionedResolverImpl": "0xa9d3814ab151bf6e37a427432795371a8361614e",
+    "UniversalResolverV2": "0xfea8d4b7fcce0b8765c793d6695eac384aaa458f",
+    "LabelStore": "0xd7351f76866123a7e49381f38a30a96adba7e855",
+    "MockUSDC": "0xcbfd80f74375c54e545af34788ff465f96f66f05"
+  },
+  "uniswap": {
+    "PermissionsAdapterFactory": "0xE6B0d96919334C33d06266d1420F97f6f434fA2B",
+    "PermissionedPositionManager": "0xf99D553912084c99F6299291b75Fe9B7119Aa1A7",
+    "PermissionedHooks": "0x51247E2291d290d17C08813A175AC86465EdE8c0",
+    "UniversalRouter": "0x54C707Df83f03bc9cA64ED2CcF9C99B63FD854b7",
+    "V4Quoter": "0x61B3f2011A92d183C7dbaDBdA940a7555Ccf9227",
+    "MixedRouteQuoterV2": "0x4745F77b56a0E2294426E3936dc4Fab68d9543Cd",
+    "PoolManager": "0xE03A1074c86CFeDd5C142C4F04F1a1536e203543"
+  },
+  "pool": {
+    "currency0": "0x0000000000000000000000000000000000000000",
+    "currency1": "0x83b0f98b15c8cDFDbf2C172FD141226f97C649d9",
+    "fee": 3000,
+    "tickSpacing": 60,
+    "hooks": "0x51247E2291d290d17C08813A175AC86465EdE8c0",
+    "poolId": "0xa92095ee33a2d7187d737863a9f351d34306b5823e6fe59aeea57de7134138b0",
+    "note": "currency0=ETH, currency1=adapter (wrapping CanopyTestToken)"
+  }
+}
