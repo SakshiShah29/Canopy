@@ -56,4 +56,30 @@ contract ApplicationContract {
             requestedTier
         );
     }
+
+    /// @notice Submit on behalf of any wallet — for testing/demo only.
+    /// @dev In production, the wallet would always be msg.sender.
+    function submitApplicationFor(
+        address wallet,
+        address issuer,
+        address broker,
+        string calldata brokerPath,
+        uint8 requestedTier
+    ) external {
+        require(requestedTier <= 1, "invalid tier");
+
+        uint256 nonce = nonces[wallet]++;
+        bytes32 applicationId = keccak256(
+            abi.encodePacked(wallet, block.timestamp, nonce)
+        );
+
+        emit ApplicationSubmitted(
+            applicationId,
+            wallet,
+            issuer,
+            broker,
+            brokerPath,
+            requestedTier
+        );
+    }
 }

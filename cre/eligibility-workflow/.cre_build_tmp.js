@@ -78,6 +78,65 @@ var init_regex = __esm(() => {
   integerRegex = /^u?int(8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?$/;
   isTupleRegex = /^\(.+?\).*?$/;
 });
+function formatAbiParameter(abiParameter) {
+  let type = abiParameter.type;
+  if (tupleRegex.test(abiParameter.type) && "components" in abiParameter) {
+    type = "(";
+    const length = abiParameter.components.length;
+    for (let i = 0;i < length; i++) {
+      const component = abiParameter.components[i];
+      type += formatAbiParameter(component);
+      if (i < length - 1)
+        type += ", ";
+    }
+    const result = execTyped(tupleRegex, abiParameter.type);
+    type += `)${result?.array ?? ""}`;
+    return formatAbiParameter({
+      ...abiParameter,
+      type
+    });
+  }
+  if ("indexed" in abiParameter && abiParameter.indexed)
+    type = `${type} indexed`;
+  if (abiParameter.name)
+    return `${type} ${abiParameter.name}`;
+  return type;
+}
+var tupleRegex;
+var init_formatAbiParameter = __esm(() => {
+  init_regex();
+  tupleRegex = /^tuple(?<array>(\[(\d*)\])*)$/;
+});
+function formatAbiParameters(abiParameters) {
+  let params = "";
+  const length = abiParameters.length;
+  for (let i = 0;i < length; i++) {
+    const abiParameter = abiParameters[i];
+    params += formatAbiParameter(abiParameter);
+    if (i !== length - 1)
+      params += ", ";
+  }
+  return params;
+}
+var init_formatAbiParameters = __esm(() => {
+  init_formatAbiParameter();
+});
+function formatAbiItem(abiItem) {
+  if (abiItem.type === "function")
+    return `function ${abiItem.name}(${formatAbiParameters(abiItem.inputs)})${abiItem.stateMutability && abiItem.stateMutability !== "nonpayable" ? ` ${abiItem.stateMutability}` : ""}${abiItem.outputs?.length ? ` returns (${formatAbiParameters(abiItem.outputs)})` : ""}`;
+  if (abiItem.type === "event")
+    return `event ${abiItem.name}(${formatAbiParameters(abiItem.inputs)})`;
+  if (abiItem.type === "error")
+    return `error ${abiItem.name}(${formatAbiParameters(abiItem.inputs)})`;
+  if (abiItem.type === "constructor")
+    return `constructor(${formatAbiParameters(abiItem.inputs)})${abiItem.stateMutability === "payable" ? " payable" : ""}`;
+  if (abiItem.type === "fallback")
+    return `fallback() external${abiItem.stateMutability === "payable" ? " payable" : ""}`;
+  return "receive() external payable";
+}
+var init_formatAbiItem = __esm(() => {
+  init_formatAbiParameters();
+});
 function isStructSignature(signature) {
   return structSignatureRegex.test(signature);
 }
@@ -592,7 +651,27 @@ var init_parseAbiParameters = __esm(() => {
   init_utils();
 });
 var init_exports = __esm(() => {
+  init_formatAbiItem();
   init_parseAbiParameters();
+});
+function formatAbiItem2(abiItem, { includeName = false } = {}) {
+  if (abiItem.type !== "function" && abiItem.type !== "event" && abiItem.type !== "error")
+    throw new InvalidDefinitionTypeError(abiItem.type);
+  return `${abiItem.name}(${formatAbiParams(abiItem.inputs, { includeName })})`;
+}
+function formatAbiParams(params, { includeName = false } = {}) {
+  if (!params)
+    return "";
+  return params.map((param) => formatAbiParam(param, { includeName })).join(includeName ? ", " : ",");
+}
+function formatAbiParam(param, { includeName }) {
+  if (param.type.startsWith("tuple")) {
+    return `(${formatAbiParams(param.components, { includeName })})${param.type.slice("tuple".length)}`;
+  }
+  return param.type + (includeName && param.name ? ` ${param.name}` : "");
+}
+var init_formatAbiItem2 = __esm(() => {
+  init_abi();
 });
 function isHex(value, { strict = true } = {}) {
   if (!value)
@@ -695,14 +774,62 @@ var init_base = __esm(() => {
     }
   };
 });
+var AbiDecodingDataSizeTooSmallError;
+var AbiDecodingZeroDataError;
 var AbiEncodingArrayLengthMismatchError;
 var AbiEncodingBytesSizeMismatchError;
 var AbiEncodingLengthMismatchError;
+var AbiFunctionNotFoundError;
+var AbiFunctionOutputsNotFoundError;
+var AbiItemAmbiguityError;
 var InvalidAbiEncodingTypeError;
+var InvalidAbiDecodingTypeError;
 var InvalidArrayError;
+var InvalidDefinitionTypeError;
 var init_abi = __esm(() => {
+  init_formatAbiItem2();
   init_size();
   init_base();
+  AbiDecodingDataSizeTooSmallError = class AbiDecodingDataSizeTooSmallError2 extends BaseError2 {
+    constructor({ data, params, size: size2 }) {
+      super([`Data size of ${size2} bytes is too small for given parameters.`].join(`
+`), {
+        metaMessages: [
+          `Params: (${formatAbiParams(params, { includeName: true })})`,
+          `Data:   ${data} (${size2} bytes)`
+        ],
+        name: "AbiDecodingDataSizeTooSmallError"
+      });
+      Object.defineProperty(this, "data", {
+        enumerable: true,
+        configurable: true,
+        writable: true,
+        value: undefined
+      });
+      Object.defineProperty(this, "params", {
+        enumerable: true,
+        configurable: true,
+        writable: true,
+        value: undefined
+      });
+      Object.defineProperty(this, "size", {
+        enumerable: true,
+        configurable: true,
+        writable: true,
+        value: undefined
+      });
+      this.data = data;
+      this.params = params;
+      this.size = size2;
+    }
+  };
+  AbiDecodingZeroDataError = class AbiDecodingZeroDataError2 extends BaseError2 {
+    constructor() {
+      super('Cannot decode zero data ("0x") with ABI parameters.', {
+        name: "AbiDecodingZeroDataError"
+      });
+    }
+  };
   AbiEncodingArrayLengthMismatchError = class AbiEncodingArrayLengthMismatchError2 extends BaseError2 {
     constructor({ expectedLength, givenLength, type }) {
       super([
@@ -728,6 +855,45 @@ var init_abi = __esm(() => {
 `), { name: "AbiEncodingLengthMismatchError" });
     }
   };
+  AbiFunctionNotFoundError = class AbiFunctionNotFoundError2 extends BaseError2 {
+    constructor(functionName, { docsPath } = {}) {
+      super([
+        `Function ${functionName ? `"${functionName}" ` : ""}not found on ABI.`,
+        "Make sure you are using the correct ABI and that the function exists on it."
+      ].join(`
+`), {
+        docsPath,
+        name: "AbiFunctionNotFoundError"
+      });
+    }
+  };
+  AbiFunctionOutputsNotFoundError = class AbiFunctionOutputsNotFoundError2 extends BaseError2 {
+    constructor(functionName, { docsPath }) {
+      super([
+        `Function "${functionName}" does not contain any \`outputs\` on ABI.`,
+        "Cannot decode function result without knowing what the parameter types are.",
+        "Make sure you are using the correct ABI and that the function exists on it."
+      ].join(`
+`), {
+        docsPath,
+        name: "AbiFunctionOutputsNotFoundError"
+      });
+    }
+  };
+  AbiItemAmbiguityError = class AbiItemAmbiguityError2 extends BaseError2 {
+    constructor(x, y) {
+      super("Found ambiguous types in overloaded ABI items.", {
+        metaMessages: [
+          `\`${x.type}\` in \`${formatAbiItem2(x.abiItem)}\`, and`,
+          `\`${y.type}\` in \`${formatAbiItem2(y.abiItem)}\``,
+          "",
+          "These types encode differently and cannot be distinguished at runtime.",
+          "Remove one of the ambiguous items in the ABI."
+        ],
+        name: "AbiItemAmbiguityError"
+      });
+    }
+  };
   InvalidAbiEncodingTypeError = class InvalidAbiEncodingTypeError2 extends BaseError2 {
     constructor(type, { docsPath }) {
       super([
@@ -737,12 +903,30 @@ var init_abi = __esm(() => {
 `), { docsPath, name: "InvalidAbiEncodingType" });
     }
   };
+  InvalidAbiDecodingTypeError = class InvalidAbiDecodingTypeError2 extends BaseError2 {
+    constructor(type, { docsPath }) {
+      super([
+        `Type "${type}" is not a valid decoding type.`,
+        "Please provide a valid ABI type."
+      ].join(`
+`), { docsPath, name: "InvalidAbiDecodingType" });
+    }
+  };
   InvalidArrayError = class InvalidArrayError2 extends BaseError2 {
     constructor(value) {
       super([`Value "${value}" is not a valid array.`].join(`
 `), {
         name: "InvalidArrayError"
       });
+    }
+  };
+  InvalidDefinitionTypeError = class InvalidDefinitionTypeError2 extends BaseError2 {
+    constructor(type) {
+      super([
+        `"${type}" is not a valid definition type.`,
+        'Valid types: "function", "event", "error"'
+      ].join(`
+`), { name: "InvalidDefinitionTypeError" });
     }
   };
 });
@@ -798,6 +982,7 @@ var init_pad = __esm(() => {
   init_data();
 });
 var IntegerOutOfRangeError;
+var InvalidBytesBooleanError;
 var SizeOverflowError;
 var init_encoding = __esm(() => {
   init_base();
@@ -806,12 +991,36 @@ var init_encoding = __esm(() => {
       super(`Number "${value}" is not in safe ${size2 ? `${size2 * 8}-bit ${signed ? "signed" : "unsigned"} ` : ""}integer range ${max ? `(${min} to ${max})` : `(above ${min})`}`, { name: "IntegerOutOfRangeError" });
     }
   };
+  InvalidBytesBooleanError = class InvalidBytesBooleanError2 extends BaseError2 {
+    constructor(bytes) {
+      super(`Bytes value "${bytes}" is not a valid boolean. The bytes array must contain a single byte of either a 0 or 1 value.`, {
+        name: "InvalidBytesBooleanError"
+      });
+    }
+  };
   SizeOverflowError = class SizeOverflowError2 extends BaseError2 {
     constructor({ givenSize, maxSize }) {
       super(`Size cannot exceed ${maxSize} bytes. Given size: ${givenSize} bytes.`, { name: "SizeOverflowError" });
     }
   };
 });
+function trim(hexOrBytes, { dir = "left" } = {}) {
+  let data = typeof hexOrBytes === "string" ? hexOrBytes.replace("0x", "") : hexOrBytes;
+  let sliceLength = 0;
+  for (let i = 0;i < data.length - 1; i++) {
+    if (data[dir === "left" ? i : data.length - i - 1].toString() === "0")
+      sliceLength++;
+    else
+      break;
+  }
+  data = dir === "left" ? data.slice(sliceLength) : data.slice(0, data.length - sliceLength);
+  if (typeof hexOrBytes === "string") {
+    if (data.length === 1 && dir === "right")
+      data = `${data}0`;
+    return `0x${data.length % 2 === 1 ? `0${data}` : data}`;
+  }
+  return data;
+}
 function assertSize(hexOrBytes, { size: size2 }) {
   if (size(hexOrBytes) > size2)
     throw new SizeOverflowError({
@@ -1292,6 +1501,83 @@ var init_keccak256 = __esm(() => {
   init_toBytes();
   init_toHex();
 });
+function hashSignature(sig) {
+  return hash(sig);
+}
+var hash = (value) => keccak256(toBytes(value));
+var init_hashSignature = __esm(() => {
+  init_toBytes();
+  init_keccak256();
+});
+function normalizeSignature(signature) {
+  let active = true;
+  let current = "";
+  let level = 0;
+  let result = "";
+  let valid = false;
+  for (let i = 0;i < signature.length; i++) {
+    const char = signature[i];
+    if (["(", ")", ","].includes(char))
+      active = true;
+    if (char === "(")
+      level++;
+    if (char === ")")
+      level--;
+    if (!active)
+      continue;
+    if (level === 0) {
+      if (char === " " && ["event", "function", ""].includes(result))
+        result = "";
+      else {
+        result += char;
+        if (char === ")") {
+          valid = true;
+          break;
+        }
+      }
+      continue;
+    }
+    if (char === " ") {
+      if (signature[i - 1] !== "," && current !== "," && current !== ",(") {
+        current = "";
+        active = false;
+      }
+      continue;
+    }
+    result += char;
+    current += char;
+  }
+  if (!valid)
+    throw new BaseError2("Unable to normalize signature.");
+  return result;
+}
+var init_normalizeSignature = __esm(() => {
+  init_base();
+});
+var toSignature = (def) => {
+  const def_ = (() => {
+    if (typeof def === "string")
+      return def;
+    return formatAbiItem(def);
+  })();
+  return normalizeSignature(def_);
+};
+var init_toSignature = __esm(() => {
+  init_exports();
+  init_normalizeSignature();
+});
+function toSignatureHash(fn) {
+  return hashSignature(toSignature(fn));
+}
+var init_toSignatureHash = __esm(() => {
+  init_hashSignature();
+  init_toSignature();
+});
+var toEventSelector;
+var init_toEventSelector = __esm(() => {
+  init_toSignatureHash();
+  toEventSelector = toSignatureHash;
+});
 var InvalidAddressError;
 var init_address = __esm(() => {
   init_base();
@@ -1343,13 +1629,13 @@ function checksumAddress(address_, chainId) {
   if (checksumAddressCache.has(`${address_}.${chainId}`))
     return checksumAddressCache.get(`${address_}.${chainId}`);
   const hexAddress = chainId ? `${chainId}${address_.toLowerCase()}` : address_.substring(2).toLowerCase();
-  const hash = keccak256(stringToBytes(hexAddress), "bytes");
+  const hash2 = keccak256(stringToBytes(hexAddress), "bytes");
   const address = (chainId ? hexAddress.substring(`${chainId}0x`.length) : hexAddress).split("");
   for (let i = 0;i < 40; i += 2) {
-    if (hash[i >> 1] >> 4 >= 8 && address[i]) {
+    if (hash2[i >> 1] >> 4 >= 8 && address[i]) {
       address[i] = address[i].toUpperCase();
     }
-    if ((hash[i >> 1] & 15) >= 8 && address[i + 1]) {
+    if ((hash2[i >> 1] & 15) >= 8 && address[i + 1]) {
       address[i + 1] = address[i + 1].toUpperCase();
     }
   }
@@ -1685,6 +1971,594 @@ var init_encodeAbiParameters = __esm(() => {
   init_slice();
   init_toHex();
   init_regex2();
+});
+var toFunctionSelector = (fn) => slice(toSignatureHash(fn), 0, 4);
+var init_toFunctionSelector = __esm(() => {
+  init_slice();
+  init_toSignatureHash();
+});
+function getAbiItem(parameters) {
+  const { abi, args = [], name } = parameters;
+  const isSelector = isHex(name, { strict: false });
+  const abiItems = abi.filter((abiItem) => {
+    if (isSelector) {
+      if (abiItem.type === "function")
+        return toFunctionSelector(abiItem) === name;
+      if (abiItem.type === "event")
+        return toEventSelector(abiItem) === name;
+      return false;
+    }
+    return "name" in abiItem && abiItem.name === name;
+  });
+  if (abiItems.length === 0)
+    return;
+  if (abiItems.length === 1)
+    return abiItems[0];
+  let matchedAbiItem = undefined;
+  for (const abiItem of abiItems) {
+    if (!("inputs" in abiItem))
+      continue;
+    if (!args || args.length === 0) {
+      if (!abiItem.inputs || abiItem.inputs.length === 0)
+        return abiItem;
+      continue;
+    }
+    if (!abiItem.inputs)
+      continue;
+    if (abiItem.inputs.length === 0)
+      continue;
+    if (abiItem.inputs.length !== args.length)
+      continue;
+    const matched = args.every((arg, index) => {
+      const abiParameter = "inputs" in abiItem && abiItem.inputs[index];
+      if (!abiParameter)
+        return false;
+      return isArgOfType(arg, abiParameter);
+    });
+    if (matched) {
+      if (matchedAbiItem && "inputs" in matchedAbiItem && matchedAbiItem.inputs) {
+        const ambiguousTypes = getAmbiguousTypes(abiItem.inputs, matchedAbiItem.inputs, args);
+        if (ambiguousTypes)
+          throw new AbiItemAmbiguityError({
+            abiItem,
+            type: ambiguousTypes[0]
+          }, {
+            abiItem: matchedAbiItem,
+            type: ambiguousTypes[1]
+          });
+      }
+      matchedAbiItem = abiItem;
+    }
+  }
+  if (matchedAbiItem)
+    return matchedAbiItem;
+  return abiItems[0];
+}
+function isArgOfType(arg, abiParameter) {
+  const argType = typeof arg;
+  const abiParameterType = abiParameter.type;
+  switch (abiParameterType) {
+    case "address":
+      return isAddress(arg, { strict: false });
+    case "bool":
+      return argType === "boolean";
+    case "function":
+      return argType === "string";
+    case "string":
+      return argType === "string";
+    default: {
+      if (abiParameterType === "tuple" && "components" in abiParameter)
+        return Object.values(abiParameter.components).every((component, index) => {
+          return isArgOfType(Object.values(arg)[index], component);
+        });
+      if (/^u?int(8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?$/.test(abiParameterType))
+        return argType === "number" || argType === "bigint";
+      if (/^bytes([1-9]|1[0-9]|2[0-9]|3[0-2])?$/.test(abiParameterType))
+        return argType === "string" || arg instanceof Uint8Array;
+      if (/[a-z]+[1-9]{0,3}(\[[0-9]{0,}\])+$/.test(abiParameterType)) {
+        return Array.isArray(arg) && arg.every((x) => isArgOfType(x, {
+          ...abiParameter,
+          type: abiParameterType.replace(/(\[[0-9]{0,}\])$/, "")
+        }));
+      }
+      return false;
+    }
+  }
+}
+function getAmbiguousTypes(sourceParameters, targetParameters, args) {
+  for (const parameterIndex in sourceParameters) {
+    const sourceParameter = sourceParameters[parameterIndex];
+    const targetParameter = targetParameters[parameterIndex];
+    if (sourceParameter.type === "tuple" && targetParameter.type === "tuple" && "components" in sourceParameter && "components" in targetParameter)
+      return getAmbiguousTypes(sourceParameter.components, targetParameter.components, args[parameterIndex]);
+    const types2 = [sourceParameter.type, targetParameter.type];
+    const ambiguous = (() => {
+      if (types2.includes("address") && types2.includes("bytes20"))
+        return true;
+      if (types2.includes("address") && types2.includes("string"))
+        return isAddress(args[parameterIndex], { strict: false });
+      if (types2.includes("address") && types2.includes("bytes"))
+        return isAddress(args[parameterIndex], { strict: false });
+      return false;
+    })();
+    if (ambiguous)
+      return types2;
+  }
+  return;
+}
+var init_getAbiItem = __esm(() => {
+  init_abi();
+  init_isAddress();
+  init_toEventSelector();
+  init_toFunctionSelector();
+});
+function prepareEncodeFunctionData(parameters) {
+  const { abi, args, functionName } = parameters;
+  let abiItem = abi[0];
+  if (functionName) {
+    const item = getAbiItem({
+      abi,
+      args,
+      name: functionName
+    });
+    if (!item)
+      throw new AbiFunctionNotFoundError(functionName, { docsPath });
+    abiItem = item;
+  }
+  if (abiItem.type !== "function")
+    throw new AbiFunctionNotFoundError(undefined, { docsPath });
+  return {
+    abi: [abiItem],
+    functionName: toFunctionSelector(formatAbiItem2(abiItem))
+  };
+}
+var docsPath = "/docs/contract/encodeFunctionData";
+var init_prepareEncodeFunctionData = __esm(() => {
+  init_abi();
+  init_toFunctionSelector();
+  init_formatAbiItem2();
+  init_getAbiItem();
+});
+function encodeFunctionData(parameters) {
+  const { args } = parameters;
+  const { abi, functionName } = (() => {
+    if (parameters.abi.length === 1 && parameters.functionName?.startsWith("0x"))
+      return parameters;
+    return prepareEncodeFunctionData(parameters);
+  })();
+  const abiItem = abi[0];
+  const signature = functionName;
+  const data = "inputs" in abiItem && abiItem.inputs ? encodeAbiParameters(abiItem.inputs, args ?? []) : undefined;
+  return concatHex([signature, data ?? "0x"]);
+}
+var init_encodeFunctionData = __esm(() => {
+  init_encodeAbiParameters();
+  init_prepareEncodeFunctionData();
+});
+var NegativeOffsetError;
+var PositionOutOfBoundsError;
+var RecursiveReadLimitExceededError;
+var init_cursor = __esm(() => {
+  init_base();
+  NegativeOffsetError = class NegativeOffsetError2 extends BaseError2 {
+    constructor({ offset }) {
+      super(`Offset \`${offset}\` cannot be negative.`, {
+        name: "NegativeOffsetError"
+      });
+    }
+  };
+  PositionOutOfBoundsError = class PositionOutOfBoundsError2 extends BaseError2 {
+    constructor({ length, position }) {
+      super(`Position \`${position}\` is out of bounds (\`0 < position < ${length}\`).`, { name: "PositionOutOfBoundsError" });
+    }
+  };
+  RecursiveReadLimitExceededError = class RecursiveReadLimitExceededError2 extends BaseError2 {
+    constructor({ count, limit }) {
+      super(`Recursive read limit of \`${limit}\` exceeded (recursive read count: \`${count}\`).`, { name: "RecursiveReadLimitExceededError" });
+    }
+  };
+});
+function createCursor(bytes, { recursiveReadLimit = 8192 } = {}) {
+  const cursor = Object.create(staticCursor);
+  cursor.bytes = bytes;
+  cursor.dataView = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  cursor.positionReadCount = new Map;
+  cursor.recursiveReadLimit = recursiveReadLimit;
+  return cursor;
+}
+var staticCursor;
+var init_cursor2 = __esm(() => {
+  init_cursor();
+  staticCursor = {
+    bytes: new Uint8Array,
+    dataView: new DataView(new ArrayBuffer(0)),
+    position: 0,
+    positionReadCount: new Map,
+    recursiveReadCount: 0,
+    recursiveReadLimit: Number.POSITIVE_INFINITY,
+    assertReadLimit() {
+      if (this.recursiveReadCount >= this.recursiveReadLimit)
+        throw new RecursiveReadLimitExceededError({
+          count: this.recursiveReadCount + 1,
+          limit: this.recursiveReadLimit
+        });
+    },
+    assertPosition(position) {
+      if (position < 0 || position > this.bytes.length - 1)
+        throw new PositionOutOfBoundsError({
+          length: this.bytes.length,
+          position
+        });
+    },
+    decrementPosition(offset) {
+      if (offset < 0)
+        throw new NegativeOffsetError({ offset });
+      const position = this.position - offset;
+      this.assertPosition(position);
+      this.position = position;
+    },
+    getReadCount(position) {
+      return this.positionReadCount.get(position || this.position) || 0;
+    },
+    incrementPosition(offset) {
+      if (offset < 0)
+        throw new NegativeOffsetError({ offset });
+      const position = this.position + offset;
+      this.assertPosition(position);
+      this.position = position;
+    },
+    inspectByte(position_) {
+      const position = position_ ?? this.position;
+      this.assertPosition(position);
+      return this.bytes[position];
+    },
+    inspectBytes(length, position_) {
+      const position = position_ ?? this.position;
+      this.assertPosition(position + length - 1);
+      return this.bytes.subarray(position, position + length);
+    },
+    inspectUint8(position_) {
+      const position = position_ ?? this.position;
+      this.assertPosition(position);
+      return this.bytes[position];
+    },
+    inspectUint16(position_) {
+      const position = position_ ?? this.position;
+      this.assertPosition(position + 1);
+      return this.dataView.getUint16(position);
+    },
+    inspectUint24(position_) {
+      const position = position_ ?? this.position;
+      this.assertPosition(position + 2);
+      return (this.dataView.getUint16(position) << 8) + this.dataView.getUint8(position + 2);
+    },
+    inspectUint32(position_) {
+      const position = position_ ?? this.position;
+      this.assertPosition(position + 3);
+      return this.dataView.getUint32(position);
+    },
+    pushByte(byte) {
+      this.assertPosition(this.position);
+      this.bytes[this.position] = byte;
+      this.position++;
+    },
+    pushBytes(bytes) {
+      this.assertPosition(this.position + bytes.length - 1);
+      this.bytes.set(bytes, this.position);
+      this.position += bytes.length;
+    },
+    pushUint8(value) {
+      this.assertPosition(this.position);
+      this.bytes[this.position] = value;
+      this.position++;
+    },
+    pushUint16(value) {
+      this.assertPosition(this.position + 1);
+      this.dataView.setUint16(this.position, value);
+      this.position += 2;
+    },
+    pushUint24(value) {
+      this.assertPosition(this.position + 2);
+      this.dataView.setUint16(this.position, value >> 8);
+      this.dataView.setUint8(this.position + 2, value & ~4294967040);
+      this.position += 3;
+    },
+    pushUint32(value) {
+      this.assertPosition(this.position + 3);
+      this.dataView.setUint32(this.position, value);
+      this.position += 4;
+    },
+    readByte() {
+      this.assertReadLimit();
+      this._touch();
+      const value = this.inspectByte();
+      this.position++;
+      return value;
+    },
+    readBytes(length, size2) {
+      this.assertReadLimit();
+      this._touch();
+      const value = this.inspectBytes(length);
+      this.position += size2 ?? length;
+      return value;
+    },
+    readUint8() {
+      this.assertReadLimit();
+      this._touch();
+      const value = this.inspectUint8();
+      this.position += 1;
+      return value;
+    },
+    readUint16() {
+      this.assertReadLimit();
+      this._touch();
+      const value = this.inspectUint16();
+      this.position += 2;
+      return value;
+    },
+    readUint24() {
+      this.assertReadLimit();
+      this._touch();
+      const value = this.inspectUint24();
+      this.position += 3;
+      return value;
+    },
+    readUint32() {
+      this.assertReadLimit();
+      this._touch();
+      const value = this.inspectUint32();
+      this.position += 4;
+      return value;
+    },
+    get remaining() {
+      return this.bytes.length - this.position;
+    },
+    setPosition(position) {
+      const oldPosition = this.position;
+      this.assertPosition(position);
+      this.position = position;
+      return () => this.position = oldPosition;
+    },
+    _touch() {
+      if (this.recursiveReadLimit === Number.POSITIVE_INFINITY)
+        return;
+      const count = this.getReadCount();
+      this.positionReadCount.set(this.position, count + 1);
+      if (count > 0)
+        this.recursiveReadCount++;
+    }
+  };
+});
+function bytesToBigInt(bytes, opts = {}) {
+  if (typeof opts.size !== "undefined")
+    assertSize(bytes, { size: opts.size });
+  const hex = bytesToHex(bytes, opts);
+  return hexToBigInt(hex, opts);
+}
+function bytesToBool(bytes_, opts = {}) {
+  let bytes = bytes_;
+  if (typeof opts.size !== "undefined") {
+    assertSize(bytes, { size: opts.size });
+    bytes = trim(bytes);
+  }
+  if (bytes.length > 1 || bytes[0] > 1)
+    throw new InvalidBytesBooleanError(bytes);
+  return Boolean(bytes[0]);
+}
+function bytesToNumber(bytes, opts = {}) {
+  if (typeof opts.size !== "undefined")
+    assertSize(bytes, { size: opts.size });
+  const hex = bytesToHex(bytes, opts);
+  return hexToNumber(hex, opts);
+}
+function bytesToString(bytes_, opts = {}) {
+  let bytes = bytes_;
+  if (typeof opts.size !== "undefined") {
+    assertSize(bytes, { size: opts.size });
+    bytes = trim(bytes, { dir: "right" });
+  }
+  return new TextDecoder().decode(bytes);
+}
+var init_fromBytes = __esm(() => {
+  init_encoding();
+  init_fromHex();
+  init_toHex();
+});
+function decodeAbiParameters(params, data) {
+  const bytes = typeof data === "string" ? hexToBytes(data) : data;
+  const cursor = createCursor(bytes);
+  if (size(bytes) === 0 && params.length > 0)
+    throw new AbiDecodingZeroDataError;
+  if (size(data) && size(data) < 32)
+    throw new AbiDecodingDataSizeTooSmallError({
+      data: typeof data === "string" ? data : bytesToHex(data),
+      params,
+      size: size(data)
+    });
+  let consumed = 0;
+  const values = [];
+  for (let i = 0;i < params.length; ++i) {
+    const param = params[i];
+    cursor.setPosition(consumed);
+    const [data2, consumed_] = decodeParameter(cursor, param, {
+      staticPosition: 0
+    });
+    consumed += consumed_;
+    values.push(data2);
+  }
+  return values;
+}
+function decodeParameter(cursor, param, { staticPosition }) {
+  const arrayComponents = getArrayComponents(param.type);
+  if (arrayComponents) {
+    const [length, type] = arrayComponents;
+    return decodeArray(cursor, { ...param, type }, { length, staticPosition });
+  }
+  if (param.type === "tuple")
+    return decodeTuple(cursor, param, { staticPosition });
+  if (param.type === "address")
+    return decodeAddress(cursor);
+  if (param.type === "bool")
+    return decodeBool(cursor);
+  if (param.type.startsWith("bytes"))
+    return decodeBytes(cursor, param, { staticPosition });
+  if (param.type.startsWith("uint") || param.type.startsWith("int"))
+    return decodeNumber(cursor, param);
+  if (param.type === "string")
+    return decodeString(cursor, { staticPosition });
+  throw new InvalidAbiDecodingTypeError(param.type, {
+    docsPath: "/docs/contract/decodeAbiParameters"
+  });
+}
+function decodeAddress(cursor) {
+  const value = cursor.readBytes(32);
+  return [checksumAddress(bytesToHex(sliceBytes(value, -20))), 32];
+}
+function decodeArray(cursor, param, { length, staticPosition }) {
+  if (!length) {
+    const offset = bytesToNumber(cursor.readBytes(sizeOfOffset));
+    const start = staticPosition + offset;
+    const startOfData = start + sizeOfLength;
+    cursor.setPosition(start);
+    const length2 = bytesToNumber(cursor.readBytes(sizeOfLength));
+    const dynamicChild = hasDynamicChild(param);
+    let consumed2 = 0;
+    const value2 = [];
+    for (let i = 0;i < length2; ++i) {
+      cursor.setPosition(startOfData + (dynamicChild ? i * 32 : consumed2));
+      const [data, consumed_] = decodeParameter(cursor, param, {
+        staticPosition: startOfData
+      });
+      consumed2 += consumed_;
+      value2.push(data);
+    }
+    cursor.setPosition(staticPosition + 32);
+    return [value2, 32];
+  }
+  if (hasDynamicChild(param)) {
+    const offset = bytesToNumber(cursor.readBytes(sizeOfOffset));
+    const start = staticPosition + offset;
+    const value2 = [];
+    for (let i = 0;i < length; ++i) {
+      cursor.setPosition(start + i * 32);
+      const [data] = decodeParameter(cursor, param, {
+        staticPosition: start
+      });
+      value2.push(data);
+    }
+    cursor.setPosition(staticPosition + 32);
+    return [value2, 32];
+  }
+  let consumed = 0;
+  const value = [];
+  for (let i = 0;i < length; ++i) {
+    const [data, consumed_] = decodeParameter(cursor, param, {
+      staticPosition: staticPosition + consumed
+    });
+    consumed += consumed_;
+    value.push(data);
+  }
+  return [value, consumed];
+}
+function decodeBool(cursor) {
+  return [bytesToBool(cursor.readBytes(32), { size: 32 }), 32];
+}
+function decodeBytes(cursor, param, { staticPosition }) {
+  const [_, size2] = param.type.split("bytes");
+  if (!size2) {
+    const offset = bytesToNumber(cursor.readBytes(32));
+    cursor.setPosition(staticPosition + offset);
+    const length = bytesToNumber(cursor.readBytes(32));
+    if (length === 0) {
+      cursor.setPosition(staticPosition + 32);
+      return ["0x", 32];
+    }
+    const data = cursor.readBytes(length);
+    cursor.setPosition(staticPosition + 32);
+    return [bytesToHex(data), 32];
+  }
+  const value = bytesToHex(cursor.readBytes(Number.parseInt(size2), 32));
+  return [value, 32];
+}
+function decodeNumber(cursor, param) {
+  const signed = param.type.startsWith("int");
+  const size2 = Number.parseInt(param.type.split("int")[1] || "256");
+  const value = cursor.readBytes(32);
+  return [
+    size2 > 48 ? bytesToBigInt(value, { signed }) : bytesToNumber(value, { signed }),
+    32
+  ];
+}
+function decodeTuple(cursor, param, { staticPosition }) {
+  const hasUnnamedChild = param.components.length === 0 || param.components.some(({ name }) => !name);
+  const value = hasUnnamedChild ? [] : {};
+  let consumed = 0;
+  if (hasDynamicChild(param)) {
+    const offset = bytesToNumber(cursor.readBytes(sizeOfOffset));
+    const start = staticPosition + offset;
+    for (let i = 0;i < param.components.length; ++i) {
+      const component = param.components[i];
+      cursor.setPosition(start + consumed);
+      const [data, consumed_] = decodeParameter(cursor, component, {
+        staticPosition: start
+      });
+      consumed += consumed_;
+      value[hasUnnamedChild ? i : component?.name] = data;
+    }
+    cursor.setPosition(staticPosition + 32);
+    return [value, 32];
+  }
+  for (let i = 0;i < param.components.length; ++i) {
+    const component = param.components[i];
+    const [data, consumed_] = decodeParameter(cursor, component, {
+      staticPosition
+    });
+    value[hasUnnamedChild ? i : component?.name] = data;
+    consumed += consumed_;
+  }
+  return [value, consumed];
+}
+function decodeString(cursor, { staticPosition }) {
+  const offset = bytesToNumber(cursor.readBytes(32));
+  const start = staticPosition + offset;
+  cursor.setPosition(start);
+  const length = bytesToNumber(cursor.readBytes(32));
+  if (length === 0) {
+    cursor.setPosition(staticPosition + 32);
+    return ["", 32];
+  }
+  const data = cursor.readBytes(length, 32);
+  const value = bytesToString(trim(data));
+  cursor.setPosition(staticPosition + 32);
+  return [value, 32];
+}
+function hasDynamicChild(param) {
+  const { type } = param;
+  if (type === "string")
+    return true;
+  if (type === "bytes")
+    return true;
+  if (type.endsWith("[]"))
+    return true;
+  if (type === "tuple")
+    return param.components?.some(hasDynamicChild);
+  const arrayComponents = getArrayComponents(param.type);
+  if (arrayComponents && hasDynamicChild({ ...param, type: arrayComponents[1] }))
+    return true;
+  return false;
+}
+var sizeOfLength = 32;
+var sizeOfOffset = 32;
+var init_decodeAbiParameters = __esm(() => {
+  init_abi();
+  init_getAddress();
+  init_cursor2();
+  init_size();
+  init_slice();
+  init_fromBytes();
+  init_toBytes();
+  init_toHex();
+  init_encodeAbiParameters();
 });
 var crypto2;
 var init_crypto = __esm(() => {
@@ -2098,28 +2972,28 @@ var init_sha2 = __esm(() => {
   sha256 = /* @__PURE__ */ createHasher2(() => new SHA256);
 });
 var HMAC;
-var hmac = (hash, key, message) => new HMAC(hash, key).update(message).digest();
+var hmac = (hash2, key, message) => new HMAC(hash2, key).update(message).digest();
 var init_hmac = __esm(() => {
   init_utils3();
   HMAC = class HMAC2 extends Hash2 {
-    constructor(hash, _key) {
+    constructor(hash2, _key) {
       super();
       this.finished = false;
       this.destroyed = false;
-      ahash(hash);
+      ahash(hash2);
       const key = toBytes3(_key);
-      this.iHash = hash.create();
+      this.iHash = hash2.create();
       if (typeof this.iHash.update !== "function")
         throw new Error("Expected instance of class which extends utils.Hash");
       this.blockLen = this.iHash.blockLen;
       this.outputLen = this.iHash.outputLen;
       const blockLen = this.blockLen;
       const pad2 = new Uint8Array(blockLen);
-      pad2.set(key.length > blockLen ? hash.create().update(key).digest() : key);
+      pad2.set(key.length > blockLen ? hash2.create().update(key).digest() : key);
       for (let i = 0;i < pad2.length; i++)
         pad2[i] ^= 54;
       this.iHash.update(pad2);
-      this.oHash = hash.create();
+      this.oHash = hash2.create();
       for (let i = 0;i < pad2.length; i++)
         pad2[i] ^= 54 ^ 92;
       this.oHash.update(pad2);
@@ -2165,7 +3039,7 @@ var init_hmac = __esm(() => {
       this.iHash.destroy();
     }
   };
-  hmac.create = (hash, key) => new HMAC(hash, key);
+  hmac.create = (hash2, key) => new HMAC(hash2, key);
 });
 function _abool2(value, title = "") {
   if (typeof value !== "boolean") {
@@ -3574,8 +4448,8 @@ function ecdh(Point, ecdhOpts = {}) {
   };
   return Object.freeze({ getPublicKey, getSharedSecret, keygen, Point, utils, lengths });
 }
-function ecdsa(Point, hash, ecdsaOpts = {}) {
-  ahash(hash);
+function ecdsa(Point, hash2, ecdsaOpts = {}) {
+  ahash(hash2);
   _validateObject(ecdsaOpts, {}, {
     hmac: "function",
     lowS: "boolean",
@@ -3584,7 +4458,7 @@ function ecdsa(Point, hash, ecdsaOpts = {}) {
     bits2int_modN: "function"
   });
   const randomBytes2 = ecdsaOpts.randomBytes || randomBytes;
-  const hmac2 = ecdsaOpts.hmac || ((key, ...msgs) => hmac(hash, key, concatBytes2(...msgs)));
+  const hmac2 = ecdsaOpts.hmac || ((key, ...msgs) => hmac(hash2, key, concatBytes2(...msgs)));
   const { Fp, Fn } = Point;
   const { ORDER: CURVE_ORDER, BITS: fnBits } = Fn;
   const { keygen, getPublicKey, getSharedSecret, utils, lengths } = ecdh(Point, ecdsaOpts);
@@ -3724,7 +4598,7 @@ function ecdsa(Point, hash, ecdsaOpts = {}) {
   }
   function validateMsgAndHash(message, prehash) {
     _abytes2(message, undefined, "message");
-    return prehash ? _abytes2(hash(message), undefined, "prehashed message") : message;
+    return prehash ? _abytes2(hash2(message), undefined, "prehashed message") : message;
   }
   function prepSig(message, privateKey, opts) {
     if (["recovered", "canonical"].some((k) => (k in opts)))
@@ -3765,7 +4639,7 @@ function ecdsa(Point, hash, ecdsaOpts = {}) {
   function sign(message, secretKey, opts = {}) {
     message = ensureBytes("message", message);
     const { seed, k2sig } = prepSig(message, secretKey, opts);
-    const drbg = createHmacDrbg(hash.outputLen, Fn.BYTES, hmac2);
+    const drbg = createHmacDrbg(hash2.outputLen, Fn.BYTES, hmac2);
     const sig = drbg(seed, k2sig);
     return sig;
   }
@@ -3839,7 +4713,7 @@ function ecdsa(Point, hash, ecdsaOpts = {}) {
     verify,
     recoverPublicKey,
     Signature,
-    hash
+    hash: hash2
   });
 }
 function _weierstrass_legacy_opts_to_new(c) {
@@ -3890,9 +4764,9 @@ function _ecdsa_new_output_to_legacy(c, _ecdsa) {
   });
 }
 function weierstrass(c) {
-  const { CURVE, curveOpts, hash, ecdsaOpts } = _ecdsa_legacy_opts_to_new(c);
+  const { CURVE, curveOpts, hash: hash2, ecdsaOpts } = _ecdsa_legacy_opts_to_new(c);
   const Point = weierstrassN(CURVE, curveOpts);
-  const signs = ecdsa(Point, hash, ecdsaOpts);
+  const signs = ecdsa(Point, hash2, ecdsaOpts);
   return _ecdsa_new_output_to_legacy(c, signs);
 }
 var divNearest = (num, den) => (num + (num >= 0 ? den : -den) / _2n3) / den;
@@ -4015,7 +4889,7 @@ var init_weierstrass = __esm(() => {
   _4n2 = BigInt(4);
 });
 function createCurve(curveDef, defHash) {
-  const create3 = (hash) => weierstrass({ ...curveDef, hash });
+  const create3 = (hash2) => weierstrass({ ...curveDef, hash: hash2 });
   return { ...create3(defHash), create: create3 };
 }
 var init__shortw_utils = __esm(() => {
@@ -4092,7 +4966,7 @@ function hash_to_field(msg, count, options) {
     k: "number",
     hash: "function"
   });
-  const { p, k, m, hash, expand, DST } = options;
+  const { p, k, m, hash: hash2, expand, DST } = options;
   if (!isHash(options.hash))
     throw new Error("expected valid hash");
   abytes2(msg);
@@ -4102,9 +4976,9 @@ function hash_to_field(msg, count, options) {
   const len_in_bytes = count * m * L;
   let prb;
   if (expand === "xmd") {
-    prb = expand_message_xmd(msg, DST, len_in_bytes, hash);
+    prb = expand_message_xmd(msg, DST, len_in_bytes, hash2);
   } else if (expand === "xof") {
-    prb = expand_message_xof(msg, DST, len_in_bytes, k, hash);
+    prb = expand_message_xof(msg, DST, len_in_bytes, k, hash2);
   } else if (expand === "_internal_pass") {
     prb = msg;
   } else {
@@ -4419,6 +5293,32 @@ var init_secp256k1 = __esm(() => {
   }))();
   hashToCurve = /* @__PURE__ */ (() => secp256k1_hasher.hashToCurve)();
   encodeToCurve = /* @__PURE__ */ (() => secp256k1_hasher.encodeToCurve)();
+});
+function decodeFunctionResult(parameters) {
+  const { abi, args, functionName, data } = parameters;
+  let abiItem = abi[0];
+  if (functionName) {
+    const item = getAbiItem({ abi, args, name: functionName });
+    if (!item)
+      throw new AbiFunctionNotFoundError(functionName, { docsPath: docsPath2 });
+    abiItem = item;
+  }
+  if (abiItem.type !== "function")
+    throw new AbiFunctionNotFoundError(undefined, { docsPath: docsPath2 });
+  if (!abiItem.outputs)
+    throw new AbiFunctionOutputsNotFoundError(abiItem.name, { docsPath: docsPath2 });
+  const values = decodeAbiParameters(abiItem.outputs, data);
+  if (values && values.length > 1)
+    return values;
+  if (values && values.length === 1)
+    return values[0];
+  return;
+}
+var docsPath2 = "/docs/contract/decodeFunctionResult";
+var init_decodeFunctionResult = __esm(() => {
+  init_abi();
+  init_decodeAbiParameters();
+  init_getAbiItem();
 });
 var UnrecognisedErrorCode = -1;
 var Canceled = 1;
@@ -8391,8 +9291,8 @@ function publicKeyToAddress(publicKey) {
 init_size();
 init_fromHex();
 init_toHex();
-async function recoverPublicKey({ hash, signature }) {
-  const hashHex = isHex(hash) ? hash : toHex(hash);
+async function recoverPublicKey({ hash: hash2, signature }) {
+  const hashHex = isHex(hash2) ? hash2 : toHex(hash2);
   const { secp256k1: secp256k12 } = await Promise.resolve().then(() => (init_secp256k1(), exports_secp256k1));
   const signature_ = (() => {
     if (typeof signature === "object" && "r" in signature && "s" in signature) {
@@ -8420,10 +9320,13 @@ function toRecoveryBit(yParityOrV) {
     return 1;
   throw new Error("Invalid yParityOrV value");
 }
-async function recoverAddress({ hash, signature }) {
-  return publicKeyToAddress(await recoverPublicKey({ hash, signature }));
+async function recoverAddress({ hash: hash2, signature }) {
+  return publicKeyToAddress(await recoverPublicKey({ hash: hash2, signature }));
 }
+init_decodeAbiParameters();
+init_decodeFunctionResult();
 init_encodeAbiParameters();
+init_encodeFunctionData();
 init_toBytes();
 init_toHex();
 init_getAddress();
@@ -11167,9 +12070,9 @@ Url.prototype.parse = function(url, parseQueryString, slashesDenoteHost) {
         esc = escape(ae);
       rest = rest.split(ae).join(esc);
     }
-  var hash = rest.indexOf("#");
-  if (hash !== -1)
-    this.hash = rest.substr(hash), rest = rest.slice(0, hash);
+  var hash2 = rest.indexOf("#");
+  if (hash2 !== -1)
+    this.hash = rest.substr(hash2), rest = rest.slice(0, hash2);
   var qm = rest.indexOf("?");
   if (qm !== -1) {
     if (this.search = rest.substr(qm), this.query = rest.substr(qm + 1), parseQueryString)
@@ -11191,7 +12094,7 @@ Url.prototype.format = function() {
   var auth = this.auth || "";
   if (auth)
     auth = encodeURIComponent(auth), auth = auth.replace(/%3A/i, ":"), auth += "@";
-  var protocol = this.protocol || "", pathname = this.pathname || "", hash = this.hash || "", host = false, query = "";
+  var protocol = this.protocol || "", pathname = this.pathname || "", hash2 = this.hash || "", host = false, query = "";
   if (this.host)
     host = auth + this.host;
   else if (this.hostname) {
@@ -11208,13 +12111,13 @@ Url.prototype.format = function() {
       pathname = "/" + pathname;
   } else if (!host)
     host = "";
-  if (hash && hash.charAt(0) !== "#")
-    hash = "#" + hash;
+  if (hash2 && hash2.charAt(0) !== "#")
+    hash2 = "#" + hash2;
   if (search && search.charAt(0) !== "?")
     search = "?" + search;
   return pathname = pathname.replace(/[?#]/g, function(match) {
     return encodeURIComponent(match);
-  }), search = search.replace("#", "%23"), protocol + host + pathname + search + hash;
+  }), search = search.replace("#", "%23"), protocol + host + pathname + search + hash2;
 };
 Url.prototype.resolve = function(relative) {
   return this.resolveObject(urlParse(relative, false, true)).format();
@@ -15420,6 +16323,40 @@ var LAST_FINALIZED_BLOCK_NUMBER = {
 var LATEST_BLOCK_NUMBER = {
   absVal: Buffer.from([2]).toString("base64"),
   sign: "-1"
+};
+var validateHexByteLength = (hex, expectedBytes, fieldLabel) => {
+  const bytes = hexToBytes3(hex);
+  if (bytes.length !== expectedBytes) {
+    throw new Error(`Invalid ${fieldLabel}: expected ${expectedBytes} bytes, got ${bytes.length} bytes from '${hex.length > 200 ? hex.slice(0, 200) + "..." : hex}'. EVM ${fieldLabel}s must be exactly ${expectedBytes} bytes.`);
+  }
+  return hexToBase64(hex);
+};
+var logTriggerConfig = (opts) => {
+  if (!opts.addresses || opts.addresses.length === 0) {
+    throw new Error("logTriggerConfig requires at least one address. Provide an array of hex-encoded EVM addresses (20 bytes each).");
+  }
+  const addresses = opts.addresses.map((addr, i2) => {
+    try {
+      return validateHexByteLength(addr, 20, "address");
+    } catch (e) {
+      throw new Error(`Invalid address at index ${i2}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  });
+  const topics = opts.topics?.map((topicSlot, slotIndex) => ({
+    values: topicSlot.map((topic, valueIndex) => {
+      try {
+        return validateHexByteLength(topic, 32, "topic");
+      } catch (e) {
+        throw new Error(`Invalid topic at topics[${slotIndex}][${valueIndex}]: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    })
+  }));
+  const confidence = opts.confidence ? `CONFIDENCE_LEVEL_${opts.confidence}` : undefined;
+  return {
+    addresses,
+    ...topics ? { topics } : {},
+    ...confidence ? { confidence } : {}
+  };
 };
 var SOLANA_ERROR__BLOCK_HEIGHT_EXCEEDED = 1;
 var SOLANA_ERROR__INVALID_NONCE = 2;
@@ -20574,6 +21511,7 @@ var defaultLookup = new NetworkLookup({
   testnetBySelector,
   testnetBySelectorByFamily
 });
+var getNetwork = (options) => defaultLookup.find(options);
 
 class Int64 {
   static INT64_MIN = -(2n ** 63n);
@@ -21654,52 +22592,354 @@ var sendErrorResponse = (error2) => {
   hostBindings.sendResponse(payload);
 };
 var configSchema = exports_external.object({
-  schedule: exports_external.string(),
-  url: exports_external.string(),
-  secretId: exports_external.string(),
-  scoreThreshold: exports_external.number()
+  applicationContractAddress: exports_external.string(),
+  mintAttestorAddress: exports_external.string(),
+  mainnetRpcUrl: exports_external.string(),
+  etherscanBaseUrl: exports_external.string(),
+  goplusBaseUrl: exports_external.string(),
+  chainalysisOracleAddress: exports_external.string(),
+  gasLimit: exports_external.string()
 });
-var scoreResponse = (body) => {
-  let score = 0;
-  for (let i2 = 0;i2 < body.length; i2++) {
-    score = (score + body.charCodeAt(i2)) % 1000;
+var ROLE_ELIGIBLE_SWAP = 1n << 64n;
+var ROLE_ELIGIBLE_LIQUIDITY = 1n << 68n;
+var APPLICATION_SUBMITTED_TOPIC = keccak256(toHex(toBytes("ApplicationSubmitted(bytes32,address,address,address,string,uint8)")));
+var SANCTIONS_ABI = [
+  {
+    name: "isSanctioned",
+    type: "function",
+    inputs: [{ name: "addr", type: "address" }],
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "view"
   }
-  return score;
-};
-var onCronTrigger = (runtime2) => {
+];
+function topicToAddress(topic) {
+  const hex = Buffer.from(topic.slice(12)).toString("hex");
+  return `0x${hex}`;
+}
+function bytesToHexStr(bytes) {
+  return `0x${Buffer.from(bytes).toString("hex")}`;
+}
+function toBase64Body(str) {
+  return hexToBase64(toHex(toBytes(str)));
+}
+function intersect(a, b) {
+  if (!a)
+    return b;
+  if (!b)
+    return a;
+  return a.filter((x) => b.includes(x));
+}
+function union(a, b) {
+  if (!a)
+    return b;
+  if (!b)
+    return a;
+  return [...new Set([...a, ...b])];
+}
+function lookupPolicy(rulebook, brokerPath) {
+  const issuerLabel = brokerPath.split("/")[0];
+  const issuerDefault = rulebook[`${issuerLabel}/_default`];
+  if (!issuerDefault) {
+    throw new Error(`No issuer default policy for "${issuerLabel}"`);
+  }
+  const brokerOverride = rulebook[brokerPath];
+  if (!brokerOverride)
+    return issuerDefault;
+  return {
+    version: brokerOverride.version ?? issuerDefault.version,
+    minScore: Math.max(issuerDefault.minScore ?? 0, brokerOverride.minScore ?? 0),
+    minAgeDays: Math.max(issuerDefault.minAgeDays ?? 0, brokerOverride.minAgeDays ?? 0),
+    maxTier: Math.min(issuerDefault.maxTier ?? 1, brokerOverride.maxTier ?? 1),
+    expiryDays: Math.min(issuerDefault.expiryDays ?? 365, brokerOverride.expiryDays ?? 365),
+    jurisdictions: {
+      allow: intersect(issuerDefault.jurisdictions?.allow, brokerOverride.jurisdictions?.allow),
+      deny: union(issuerDefault.jurisdictions?.deny, brokerOverride.jurisdictions?.deny)
+    }
+  };
+}
+function computeRiskScore(goplus, walletAgeDays) {
+  let score = 100;
+  if (goplus.sanctioned === "1")
+    return 0;
+  if (goplus.mixer === "1")
+    return 0;
+  if (goplus.phishing_activities === "1")
+    score -= 40;
+  if (goplus.honeypot_related_address === "1")
+    score -= 30;
+  if (goplus.malicious_mining_activities === "1")
+    score -= 20;
+  if (goplus.blacklist_doubt === "1")
+    score -= 15;
+  if (walletAgeDays < 7)
+    score -= 30;
+  else if (walletAgeDays < 30)
+    score -= 15;
+  else if (walletAgeDays < 90)
+    score -= 5;
+  return Math.max(0, score);
+}
+function evaluate(riskScore, walletAgeDays, chainalysisSanctioned, goplus, policy, requestedTier, nowSeconds) {
+  const reject = (reason) => ({
+    approved: false,
+    roleBitmap: 0n,
+    expiry: 0n,
+    reason
+  });
+  if (chainalysisSanctioned)
+    return reject("SANCTIONED_CHAINALYSIS");
+  if (goplus.sanctioned === "1")
+    return reject("SANCTIONED_GOPLUS");
+  if (goplus.mixer === "1")
+    return reject("MIXER_ASSOCIATED");
+  if (walletAgeDays < (policy.minAgeDays ?? 0))
+    return reject("WALLET_TOO_NEW");
+  if (riskScore < (policy.minScore ?? 0))
+    return reject("SCORE_BELOW_THRESHOLD");
+  const actualTier = Math.min(requestedTier, policy.maxTier ?? 1);
+  let roleBitmap = ROLE_ELIGIBLE_SWAP;
+  if (actualTier >= 1) {
+    roleBitmap = ROLE_ELIGIBLE_SWAP | ROLE_ELIGIBLE_LIQUIDITY;
+  }
+  const expiry = BigInt(nowSeconds + (policy.expiryDays ?? 365) * 86400);
+  return { approved: true, roleBitmap, expiry };
+}
+function checkChainalysis(runtime2, wallet) {
   const config = runtime2.config;
-  const apiToken = runtime2.getSecret({ id: config.secretId }).result().value;
-  const response = new cre.capabilities.HTTPClient().sendRequest(runtime2, {
-    url: config.url,
+  const httpClient = new cre.capabilities.HTTPClient;
+  const calldata = encodeFunctionData({
+    abi: SANCTIONS_ABI,
+    functionName: "isSanctioned",
+    args: [wallet]
+  });
+  const resp = httpClient.sendRequest(runtime2, {
+    url: config.mainnetRpcUrl,
+    method: "POST",
+    multiHeaders: { "Content-Type": { values: ["application/json"] } },
+    body: toBase64Body(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_call",
+      params: [
+        { to: config.chainalysisOracleAddress, data: calldata },
+        "latest"
+      ]
+    }))
+  }).result();
+  if (!ok(resp)) {
+    runtime2.log("Chainalysis RPC call failed — defaulting to REJECT");
+    return true;
+  }
+  const rpcResult = JSON.parse(text(resp));
+  if (rpcResult.error || !rpcResult.result) {
+    runtime2.log("Chainalysis RPC returned error — defaulting to REJECT");
+    return true;
+  }
+  const sanctioned = decodeFunctionResult({
+    abi: SANCTIONS_ABI,
+    functionName: "isSanctioned",
+    data: rpcResult.result
+  });
+  return sanctioned;
+}
+function sha1(message) {
+  const encode = (s) => {
+    const bytes = [];
+    for (let i2 = 0;i2 < s.length; i2++) {
+      const c = s.charCodeAt(i2);
+      if (c < 128)
+        bytes.push(c);
+      else if (c < 2048) {
+        bytes.push(192 | c >> 6);
+        bytes.push(128 | c & 63);
+      } else {
+        bytes.push(224 | c >> 12);
+        bytes.push(128 | c >> 6 & 63);
+        bytes.push(128 | c & 63);
+      }
+    }
+    return bytes;
+  };
+  const utf8 = encode(message);
+  const bitLen2 = utf8.length * 8;
+  utf8.push(128);
+  while (utf8.length % 64 !== 56)
+    utf8.push(0);
+  for (let i2 = 56;i2 >= 0; i2 -= 8)
+    utf8.push(0);
+  utf8.splice(utf8.length - 4);
+  utf8.push(bitLen2 >>> 24 & 255, bitLen2 >>> 16 & 255, bitLen2 >>> 8 & 255, bitLen2 & 255);
+  let h0 = 1732584193, h1 = 4023233417, h2 = 2562383102, h3 = 271733878, h4 = 3285377520;
+  const rotl = (v, n) => (v << n | v >>> 32 - n) >>> 0;
+  for (let offset = 0;offset < utf8.length; offset += 64) {
+    const w = new Array(80);
+    for (let i2 = 0;i2 < 16; i2++) {
+      w[i2] = (utf8[offset + i2 * 4] << 24 | utf8[offset + i2 * 4 + 1] << 16 | utf8[offset + i2 * 4 + 2] << 8 | utf8[offset + i2 * 4 + 3]) >>> 0;
+    }
+    for (let i2 = 16;i2 < 80; i2++)
+      w[i2] = rotl(w[i2 - 3] ^ w[i2 - 8] ^ w[i2 - 14] ^ w[i2 - 16], 1);
+    let a = h0, b = h1, c = h2, d = h3, e2 = h4;
+    for (let i2 = 0;i2 < 80; i2++) {
+      let f, k;
+      if (i2 < 20) {
+        f = (b & c | ~b & d) >>> 0;
+        k = 1518500249;
+      } else if (i2 < 40) {
+        f = (b ^ c ^ d) >>> 0;
+        k = 1859775393;
+      } else if (i2 < 60) {
+        f = (b & c | b & d | c & d) >>> 0;
+        k = 2400959708;
+      } else {
+        f = (b ^ c ^ d) >>> 0;
+        k = 3395469782;
+      }
+      const temp = rotl(a, 5) + f + e2 + k + w[i2] >>> 0;
+      e2 = d;
+      d = c;
+      c = rotl(b, 30);
+      b = a;
+      a = temp;
+    }
+    h0 = h0 + a >>> 0;
+    h1 = h1 + b >>> 0;
+    h2 = h2 + c >>> 0;
+    h3 = h3 + d >>> 0;
+    h4 = h4 + e2 >>> 0;
+  }
+  const hex = (n) => n.toString(16).padStart(8, "0");
+  return hex(h0) + hex(h1) + hex(h2) + hex(h3) + hex(h4);
+}
+function getGoPlusToken(runtime2, appKey, appSecret) {
+  const httpClient = new cre.capabilities.HTTPClient;
+  const time = Math.floor(Date.now() / 1000);
+  const sign = sha1(`${appKey}${time}${appSecret}`);
+  const resp = httpClient.sendRequest(runtime2, {
+    url: `${runtime2.config.goplusBaseUrl}/token`,
+    method: "POST",
+    multiHeaders: { "Content-Type": { values: ["application/json"] } },
+    body: toBase64Body(JSON.stringify({ app_key: appKey, time, sign }))
+  }).result();
+  if (!ok(resp)) {
+    runtime2.log("GoPlus token request failed");
+    return "";
+  }
+  const body = JSON.parse(text(resp));
+  return body.result?.access_token ?? "";
+}
+function checkGoPlus(runtime2, appKey, appSecret, wallet) {
+  const config = runtime2.config;
+  const httpClient = new cre.capabilities.HTTPClient;
+  const accessToken = getGoPlusToken(runtime2, appKey, appSecret);
+  if (!accessToken) {
+    runtime2.log("GoPlus: no access token — returning empty risk profile");
+    return {};
+  }
+  const resp = httpClient.sendRequest(runtime2, {
+    url: `${config.goplusBaseUrl}/address_security/${wallet}?chain_id=1`,
     method: "GET",
     multiHeaders: {
-      Authorization: { values: [`Bearer ${apiToken}`] }
+      Authorization: { values: [accessToken.startsWith("Bearer ") ? accessToken : `Bearer ${accessToken}`] }
     }
   }).result();
-  if (!ok(response)) {
-    throw new Error(`Confidential request failed with status: ${response.statusCode}`);
+  if (!ok(resp)) {
+    runtime2.log("GoPlus API call failed — returning empty risk profile");
+    return {};
   }
-  const body = text(response);
-  const secretReachedApi = body.includes(apiToken);
-  const score = scoreResponse(body);
-  const verdict = score >= config.scoreThreshold ? "APPROVE" : "REJECT";
-  runtime2.log(`Enclave computation complete. verdict=${verdict}`);
+  const body = JSON.parse(text(resp));
+  return body.result ?? {};
+}
+function checkWalletAge(runtime2, etherscanKey, wallet, nowSeconds) {
+  const config = runtime2.config;
+  const httpClient = new cre.capabilities.HTTPClient;
+  const url = `${config.etherscanBaseUrl}?chainid=1&module=account&action=txlist` + `&address=${wallet}&startblock=0&endblock=99999999` + `&page=1&offset=1&sort=asc&apikey=${etherscanKey}`;
+  const resp = httpClient.sendRequest(runtime2, { url, method: "GET" }).result();
+  if (!ok(resp)) {
+    runtime2.log("Etherscan API call failed — wallet age = 0");
+    return 0;
+  }
+  const body = JSON.parse(text(resp));
+  const firstTx = body.result?.[0];
+  if (!firstTx?.timeStamp)
+    return 0;
+  const walletAgeDays = Math.floor((nowSeconds - Number(firstTx.timeStamp)) / 86400);
+  return Math.max(0, walletAgeDays);
+}
+var onApplicationSubmitted = (runtime2, log) => {
+  const config = runtime2.config;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const wallet = topicToAddress(log.topics[2]);
+  const _issuer = topicToAddress(log.topics[3]);
+  const [broker, brokerPath, requestedTier] = decodeAbiParameters(parseAbiParameters("address broker, string brokerPath, uint8 requestedTier"), bytesToHexStr(log.data));
+  runtime2.log(`Processing application: wallet=${wallet}, brokerPath=${brokerPath}`);
+  const secrets = runtime2.getSecrets([
+    { id: "GOPLUS_APP_KEY" },
+    { id: "GOPLUS_APP_SECRET" },
+    { id: "ELIGIBILITY_RULEBOOK" },
+    { id: "ETHERSCAN_API_KEY" }
+  ]).result();
+  const goplusAppKey = secrets["GOPLUS_APP_KEY"].value;
+  const goplusAppSecret = secrets["GOPLUS_APP_SECRET"].value;
+  const rulebook = JSON.parse(secrets["ELIGIBILITY_RULEBOOK"].value);
+  const etherscanKey = secrets["ETHERSCAN_API_KEY"].value;
+  const isSanctioned = checkChainalysis(runtime2, wallet);
+  const goplusResult = checkGoPlus(runtime2, goplusAppKey, goplusAppSecret, wallet);
+  const walletAgeDays = checkWalletAge(runtime2, etherscanKey, wallet, nowSeconds);
+  const effectivePolicy = lookupPolicy(rulebook, brokerPath);
+  const riskScore = computeRiskScore(goplusResult, walletAgeDays);
+  runtime2.log(`GoPlus flags: ${JSON.stringify(goplusResult)}`);
+  runtime2.log(`WalletAgeDays=${walletAgeDays}, RiskScore=${riskScore}`);
+  const verdict = evaluate(riskScore, walletAgeDays, isSanctioned, goplusResult, effectivePolicy, requestedTier, nowSeconds);
+  runtime2.log(`Verdict: approved=${verdict.approved}${verdict.reason ? ` reason=${verdict.reason}` : ""}`);
+  const label = wallet.slice(2, 18).toLowerCase();
+  const labelBytes = stringToHex(label, { size: 32 });
+  const reportData = encodeAbiParameters(parseAbiParameters("uint8 kind, address subject, bytes32 labelBytes, address parentRegistry, uint256 roleBitmap, uint64 expiry, bool approved"), [
+    0,
+    wallet,
+    labelBytes,
+    broker,
+    verdict.roleBitmap,
+    verdict.expiry,
+    verdict.approved
+  ]);
   const donRuntime = runtime2.usingTheDons();
-  const encodedPayload = encodeAbiParameters(parseAbiParameters("string verdict, uint256 score"), [verdict, BigInt(score)]);
-  donRuntime.report({
-    encodedPayload: hexToBase64(encodedPayload),
+  const report2 = donRuntime.report({
+    encodedPayload: hexToBase64(reportData),
     encoderName: "evm",
     signingAlgo: "ecdsa",
     hashingAlgo: "keccak256"
   }).result();
-  return `${verdict} (score: ${score}, secret reached API: ${secretReachedApi})`;
+  const sepoliaNetwork = getNetwork({
+    chainFamily: "evm",
+    chainSelectorName: "ethereum-testnet-sepolia",
+    isTestnet: true
+  });
+  if (!sepoliaNetwork)
+    throw new Error("Sepolia network not found");
+  const sepoliaClient = new ClientCapability(sepoliaNetwork.chainSelector.selector);
+  sepoliaClient.writeReport(donRuntime, {
+    receiver: config.mintAttestorAddress,
+    report: report2,
+    gasConfig: { gasLimit: config.gasLimit }
+  }).result();
+  return verdict.approved ? "APPROVED" : `REJECTED:${verdict.reason ?? "UNKNOWN"}`;
 };
 function initWorkflow(config) {
-  const cronTrigger = new cre.capabilities.CronCapability;
+  const sepoliaNetwork = getNetwork({
+    chainFamily: "evm",
+    chainSelectorName: "ethereum-testnet-sepolia",
+    isTestnet: true
+  });
+  if (!sepoliaNetwork)
+    throw new Error("Sepolia network not found");
+  const sepoliaClient = new ClientCapability(sepoliaNetwork.chainSelector.selector);
+  const trigger = sepoliaClient.logTrigger(logTriggerConfig({
+    addresses: [config.applicationContractAddress],
+    topics: [[APPLICATION_SUBMITTED_TOPIC]],
+    confidence: "FINALIZED"
+  }));
   return [
-    cre.handlerInTee(cronTrigger.trigger({ schedule: config.schedule }), onCronTrigger, [
-      { tee: "nitro", regions: ["us-west-2"] }
-    ])
+    cre.handlerInTee(trigger, onApplicationSubmitted, [{ tee: "nitro", regions: ["us-west-2"] }])
   ];
 }
 async function main() {

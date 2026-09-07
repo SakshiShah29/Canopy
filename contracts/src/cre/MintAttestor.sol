@@ -1,16 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+
 import {IRegistry} from "@ens/registry/interfaces/IRegistry.sol";
 import {IPermissionedRegistry} from "@ens/registry/interfaces/IPermissionedRegistry.sol";
 import {LibLabel} from "@ens/utils/LibLabel.sol";
 
 import {ENSAllowlistChecker} from "../checker/ENSAllowlistChecker.sol";
-import {CanopyRoles} from "../checker/CanopyRoles.sol";
+
+// ─── Chainlink CRE IReceiver interface ───────────────────────
+// Copied verbatim from Chainlink docs. Implementations must support ERC165.
+interface IReceiver is IERC165 {
+    function onReport(bytes calldata metadata, bytes calldata report) external;
+}
 
 /// @title CRE Report Receiver — mints investor subnames from DON-attested verdicts
 ///
-/// @notice The Chainlink Workflow DON delivers signed reports here via the KeystoneForwarder.
+/// @notice The Chainlink Workflow DON delivers signed reports here via the KeystoneForwarder
+///         (`0xF8344CFd5c43616a4366C34E3EEE75af79a74482` on Sepolia).
+///
 ///         Each report encodes a verdict tuple produced inside an AWS Nitro enclave by the
 ///         canopy-eligibility CRE workflow. If the verdict is APPROVED, this contract:
 ///
@@ -19,16 +28,23 @@ import {CanopyRoles} from "../checker/CanopyRoles.sol";
 ///
 ///         If REJECTED, the call is a no-op (no revert — the DON still needs the tx to settle).
 ///
-/// @dev Security boundaries:
+/// @dev Security:
 ///      - `onlyForwarder`: only the KeystoneForwarder can call `onReport`
 ///      - `allowedWorkflow`: the metadata's workflowId must match the registered workflow
-///      - The report tuple is the ONLY thing that crosses the enclave confidentiality boundary
-contract MintAttestor {
+///      - The report tuple is the ONLY data that crosses the enclave confidentiality boundary
+///
+/// @dev Metadata layout (64 bytes, abi.encodePacked):
+///      | Offset | Size | Field          |
+///      |--------|------|----------------|
+///      | 0-31   | 32   | workflowId     |
+///      | 32-41  | 10   | workflowName   |
+///      | 42-61  | 20   | workflowOwner  |
+///      | 62-63  | 2    | reportId       |
+contract MintAttestor is IReceiver {
     // ── Errors ───────────────────────────────────────────────────
     error OnlyForwarder(address caller);
     error UnexpectedWorkflow(bytes32 actual);
     error UnsupportedKind(uint8 kind);
-    error SubnameAlreadyRegistered(address subject);
 
     // ── Events ───────────────────────────────────────────────────
     event VerdictReceived(
@@ -56,7 +72,7 @@ contract MintAttestor {
 
     // ── Constructor ──────────────────────────────────────────────
     /// @param _forwarder The KeystoneForwarder address on this chain.
-    /// @param _checker   The deployed ENSAllowlistChecker.
+    /// @param _checker   The deployed ENSAllowlistChecker (address(0) if not yet deployed).
     /// @param _owner     The admin who can update allowedWorkflowId.
     constructor(address _forwarder, address _checker, address _owner) {
         forwarder = _forwarder;
@@ -74,9 +90,15 @@ contract MintAttestor {
         _;
     }
 
+    // ── ERC165 ────────────────────────────────────────────────────
+    function supportsInterface(bytes4 interfaceId) public pure override returns (bool) {
+        return interfaceId == type(IReceiver).interfaceId
+            || interfaceId == type(IERC165).interfaceId;
+    }
+
     // ── Admin ────────────────────────────────────────────────────
 
-    /// @notice Set the allowed CRE workflow ID. Only reports from this workflow are processed.
+    /// @notice Set the allowed CRE workflow ID. Reports from any other workflow are rejected.
     function setAllowedWorkflowId(bytes32 id) external onlyOwner {
         allowedWorkflowId = id;
     }
@@ -91,17 +113,13 @@ contract MintAttestor {
         owner = newOwner;
     }
 
-    // ── Report Receiver ──────────────────────────────────────────
+    // ── IReceiver ────────────────────────────────────────────────
 
     /// @notice Called by the KeystoneForwarder with a DON-signed report.
-    /// @dev The metadata format follows the Chainlink CRE standard:
-    ///      bytes32 workflowId || bytes32 workflowExecutionId || ...
-    ///      We only validate workflowId for now.
-    /// @param metadata Encoded workflow metadata from the DON.
+    /// @param metadata 64 bytes: workflowId (32) || workflowName (10) || workflowOwner (20) || reportId (2)
     /// @param report   ABI-encoded verdict tuple from the enclave.
-    function onReport(bytes calldata metadata, bytes calldata report) external onlyForwarder {
+    function onReport(bytes calldata metadata, bytes calldata report) external override onlyForwarder {
         // ── Validate workflow ID ──
-        // The first 32 bytes of metadata are the workflowId.
         if (allowedWorkflowId != bytes32(0)) {
             bytes32 workflowId = bytes32(metadata[:32]);
             if (workflowId != allowedWorkflowId) revert UnexpectedWorkflow(workflowId);
@@ -124,22 +142,18 @@ contract MintAttestor {
         emit VerdictReceived(subject, approved, roleBitmap, expiry);
 
         // ── REJECT is a silent no-op ──
-        // The DON still needs the tx to settle, but we don't revert.
         if (!approved) return;
 
         // ── Guard: only investor kind ──
         if (kind != KIND_INVESTOR) revert UnsupportedKind(kind);
 
         // ── Register the investor subname ──
-        // The parentRegistry is the broker's UserRegistry. We register the investor
-        // subname under it with the label derived from the wallet address.
         string memory label = _bytes32ToString(labelBytes);
-
-        // Check if subname already exists (idempotent — skip if already registered)
         uint256 labelhash = LibLabel.id(label);
+
+        // Idempotent: skip if subname already exists and is alive
         IPermissionedRegistry.State memory state = IPermissionedRegistry(parentRegistry).getState(labelhash);
         if (state.status == IPermissionedRegistry.Status.REGISTERED && state.expiry > block.timestamp) {
-            // Already registered and alive — skip
             return;
         }
 
@@ -154,9 +168,9 @@ contract MintAttestor {
         );
 
         // ── Record the leaf in the checker ──
-        // This lets ENSAllowlistChecker.checkAllowlist() find the investor's subname
-        // and walk up the hierarchy to verify all ancestors are alive.
-        checker.recordPath(subject, IPermissionedRegistry(parentRegistry), labelhash);
+        if (address(checker) != address(0)) {
+            checker.recordPath(subject, IPermissionedRegistry(parentRegistry), labelhash);
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────

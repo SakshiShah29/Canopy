@@ -1,6 +1,6 @@
 {
-  "applicationContractAddress": "0x0000000000000000000000000000000000000000",
-  "mintAttestorAddress": "0x0000000000000000000000000000000000000000",
+  "applicationContractAddress": "0x9e567860f87CFE0dee01939a2Ca637742D6c4e60",
+  "mintAttestorAddress": "0xfF9de7d89372640bCe3746123D6802F356733a43",
   "mainnetRpcUrl": "https://ethereum-rpc.publicnode.com",
   "etherscanBaseUrl": "https://api.etherscan.io/v2/api",
   "goplusBaseUrl": "https://api.gopluslabs.io/api/v1",

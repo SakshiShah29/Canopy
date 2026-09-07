@@ -101,6 +101,11 @@ function bytesToHexStr(bytes: Uint8Array): `0x${string}` {
 	return `0x${Buffer.from(bytes).toString('hex')}` as `0x${string}`
 }
 
+// CRE HTTP body is protobuf `bytes`, so JSON representation must be base64.
+function toBase64Body(str: string): string {
+	return hexToBase64(toHex(toBytes(str)))
+}
+
 // ─── Policy Logic (public — in the source code, not the secret) ──
 
 function intersect(a?: string[], b?: string[]): string[] | undefined {
@@ -229,7 +234,7 @@ function checkChainalysis(
 			url: config.mainnetRpcUrl,
 			method: 'POST',
 			multiHeaders: { 'Content-Type': { values: ['application/json'] } },
-			body: JSON.stringify({
+			body: toBase64Body(JSON.stringify({
 				jsonrpc: '2.0',
 				id: 1,
 				method: 'eth_call',
@@ -237,7 +242,7 @@ function checkChainalysis(
 					{ to: config.chainalysisOracleAddress, data: calldata },
 					'latest',
 				],
-			}),
+			})),
 		})
 		.result()
 
@@ -249,6 +254,7 @@ function checkChainalysis(
 	}
 
 	const rpcResult = JSON.parse(text(resp))
+	runtime.log(`Chainalysis raw response: ${JSON.stringify(rpcResult)}`)
 	if (rpcResult.error || !rpcResult.result) {
 		runtime.log('Chainalysis RPC returned error — defaulting to REJECT')
 		return true
@@ -260,6 +266,7 @@ function checkChainalysis(
 		data: rpcResult.result as `0x${string}`,
 	}) as boolean
 
+	runtime.log(`Chainalysis isSanctioned=${sanctioned}`)
 	return sanctioned
 }
 
@@ -331,7 +338,7 @@ function getGoPlusToken(
 			url: `${runtime.config.goplusBaseUrl}/token`,
 			method: 'POST',
 			multiHeaders: { 'Content-Type': { values: ['application/json'] } },
-			body: JSON.stringify({ app_key: appKey, time, sign }),
+			body: toBase64Body(JSON.stringify({ app_key: appKey, time, sign })),
 		})
 		.result()
 
@@ -366,7 +373,7 @@ function checkGoPlus(
 			url: `${config.goplusBaseUrl}/address_security/${wallet}?chain_id=1`,
 			method: 'GET',
 			multiHeaders: {
-				Authorization: { values: [`Bearer ${accessToken}`] },
+				Authorization: { values: [accessToken.startsWith('Bearer ') ? accessToken : `Bearer ${accessToken}`] },
 			},
 		})
 		.result()
@@ -485,6 +492,9 @@ export const onApplicationSubmitted = (
 	// The formula is public (in this source code). The thresholds it is compared
 	// against (minScore, minAgeDays, etc.) are in the secret RULEBOOK.
 	const riskScore = computeRiskScore(goplusResult, walletAgeDays)
+
+	runtime.log(`GoPlus flags: ${JSON.stringify(goplusResult)}`)
+	runtime.log(`WalletAgeDays=${walletAgeDays}, RiskScore=${riskScore}`)
 
 	// ── Step 8: Evaluate against policy ──
 	const verdict = evaluate(
