@@ -16,7 +16,7 @@ import {Actions} from "v4-periphery/src/libraries/Actions.sol";
 import {ActionConstants} from "v4-periphery/src/libraries/ActionConstants.sol";
 import {IPermissionsAdapter} from "v4-periphery/src/hooks/permissionedPools/interfaces/IPermissionsAdapter.sol";
 
-import {IssuerAllowlistCheckerFlat} from "../src/IssuerAllowlistCheckerFlat.sol";
+import {IssuerAllowlistCheckerFlat} from "../src/checker/IssuerAllowlistCheckerFlat.sol";
 
 /// @title SeedAndSwap
 /// @notice Seeds initial liquidity into the permissioned pool and executes a test swap.

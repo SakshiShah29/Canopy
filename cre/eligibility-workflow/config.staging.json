@@ -1,6 +1,9 @@
 {
-  "schedule": "0 */1 * * * *",
-  "url": "https://postman-echo.com/headers",
-  "secretId": "API_TOKEN",
-  "scoreThreshold": 500
+  "applicationContractAddress": "0x0000000000000000000000000000000000000000",
+  "mintAttestorAddress": "0x0000000000000000000000000000000000000000",
+  "mainnetRpcUrl": "https://ethereum-rpc.publicnode.com",
+  "etherscanBaseUrl": "https://api.etherscan.io/v2/api",
+  "goplusBaseUrl": "https://api.gopluslabs.io/api/v1",
+  "chainalysisOracleAddress": "0x40C57923924B5c5c5455c48D93317139ADDaC8fb",
+  "gasLimit": "500000"
 }

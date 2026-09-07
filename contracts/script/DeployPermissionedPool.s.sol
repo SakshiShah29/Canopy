@@ -12,9 +12,10 @@ import {IPermissionsAdapterFactory} from
     "v4-periphery/src/hooks/permissionedPools/interfaces/IPermissionsAdapterFactory.sol";
 import {IPermissionsAdapter} from "v4-periphery/src/hooks/permissionedPools/interfaces/IPermissionsAdapter.sol";
 import {IAllowlistChecker} from "v4-periphery/src/hooks/permissionedPools/interfaces/IAllowlistChecker.sol";
+import {PermissionFlag, PermissionFlags} from "v4-periphery/src/hooks/permissionedPools/libraries/PermissionFlags.sol";
 
 import {CanopyTestToken} from "../src/CanopyTestToken.sol";
-import {IssuerAllowlistCheckerFlat} from "../src/IssuerAllowlistCheckerFlat.sol";
+import {IssuerAllowlistCheckerFlat} from "../src/checker/IssuerAllowlistCheckerFlat.sol";
 
 /// @title DeployPermissionedPool
 /// @notice Deploys the full permissioned pool stack on Sepolia:
@@ -66,13 +67,11 @@ contract DeployPermissionedPool is Script {
         token.mint(deployer, INITIAL_MINT);
 
         // ── Step 3: Deploy the flat allowlist checker ────────────────────
-        IssuerAllowlistCheckerFlat flatChecker = new IssuerAllowlistCheckerFlat(deployer);
+        IssuerAllowlistCheckerFlat flatChecker = new IssuerAllowlistCheckerFlat(address(token), deployer);
         console.log("IssuerAllowlistCheckerFlat:", address(flatChecker));
 
         // Add deployer to the flat checker's allowlist
-        address[] memory initial = new address[](1);
-        initial[0] = deployer;
-        flatChecker.setAllowed(initial, true);
+        flatChecker.setPermission(deployer, PermissionFlags.SWAP_ALLOWED | PermissionFlags.LIQUIDITY_ALLOWED);
 
         // ── Step 4: Create the permissions adapter via factory ───────────
         address adapterAddr =
