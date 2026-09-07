@@ -33,9 +33,20 @@ contract ENSAllowlistChecker is BaseAllowlistChecker, Ownable {
         uint256 labelhash;
     }
 
-    /// @notice The registry the upward walk must terminate at, i.e. the `.eth` registry.
+    /// @notice The registry the upward walk must terminate at — the platform root.
     /// @dev The walk is only trusted if it *reaches* this. See `_ancestorsAlive`.
     IRegistry public immutable ROOT_ANCHOR;
+
+    /// @notice The issuer this checker answers for. The walk must **pass through** it.
+    ///
+    /// @dev Reaching `ROOT_ANCHOR` proves the leaf is somewhere under the platform. Under a single
+    ///      issuer that was the same thing as belonging here; with several issuers sharing one
+    ///      root it is not, and without this every issuer's checker would admit every other
+    ///      issuer's investors — a pool opening to accounts its issuer never evaluated.
+    ///
+    ///      This is the multi-tenant twin of the `setParent` trap below: a happy-path test passes
+    ///      either way, and the failure grants rather than denies.
+    IRegistry public immutable ISSUER_REGISTRY;
 
     /// @notice The permissioned token this checker answers for.
     /// @dev `IAllowlistChecker` passes the token so one checker can serve several assets. We bind
@@ -62,8 +73,11 @@ contract ENSAllowlistChecker is BaseAllowlistChecker, Ownable {
         _;
     }
 
-    constructor(IRegistry rootAnchor, address permissionedToken, address initialOwner) Ownable(initialOwner) {
+    constructor(IRegistry rootAnchor, IRegistry issuerRegistry, address permissionedToken, address initialOwner)
+        Ownable(initialOwner)
+    {
         ROOT_ANCHOR = rootAnchor;
+        ISSUER_REGISTRY = issuerRegistry;
         PERMISSIONED_TOKEN = permissionedToken;
     }
 
@@ -109,20 +123,32 @@ contract ENSAllowlistChecker is BaseAllowlistChecker, Ownable {
         return flag;
     }
 
-    /// @dev Walks from `start` up to `ROOT_ANCHOR`, requiring every name on the way to be alive.
+    /// @dev Walks from `start` up to `ROOT_ANCHOR`, requiring every name on the way to be alive
+    ///      **and** requiring the path to pass through `ISSUER_REGISTRY`.
     ///
-    ///      The walk must *arrive* at `ROOT_ANCHOR`. Terminating anywhere else — a null parent, or
-    ///      more than `MAX_HOPS` — denies. This is deliberate and load-bearing: ENSv2's
-    ///      `setParent` is a separate call from the parent's `setSubregistry`, so a registry that
-    ///      was wired downward but never upward reports no parent at all. Treating that as
-    ///      "reached the top" would skip every ancestor expiry check and quietly grant a lapsed
-    ///      broker's investors permanent access — the exact failure this contract exists to
-    ///      prevent, and one that no happy-path test would catch.
+    ///      Two independent conditions, both fail-closed:
+    ///
+    ///      1. **The walk must arrive at `ROOT_ANCHOR`.** Terminating anywhere else — a null
+    ///         parent, or more than `MAX_HOPS` — denies. ENSv2's `setParent` is a separate call
+    ///         from the parent's `setSubregistry`, so a registry wired downward but never upward
+    ///         reports no parent at all. Treating that as "reached the top" would skip every
+    ///         ancestor expiry check and quietly grant a lapsed broker's investors permanent
+    ///         access.
+    ///
+    ///      2. **The walk must pass through `ISSUER_REGISTRY`.** Arrival alone only proves the leaf
+    ///         is somewhere under the platform, and every issuer shares that root. Without this,
+    ///         a name under one issuer satisfies every other issuer's checker.
+    ///
+    ///      Neither is visible on a happy path, and both fail by granting rather than denying,
+    ///      which is why each has its own test.
     function _ancestorsAlive(IRegistry start) private view returns (bool) {
         IRegistry current = start;
 
+        // A leaf registered directly under the issuer, with no broker in between, starts there.
+        bool throughIssuer = address(start) == address(ISSUER_REGISTRY);
+
         for (uint256 hops = 0; hops < MAX_HOPS; hops++) {
-            if (address(current) == address(ROOT_ANCHOR)) return true;
+            if (address(current) == address(ROOT_ANCHOR)) return throughIssuer;
 
             (IRegistry parent, string memory label) = current.getParent();
             if (address(parent) == address(0)) return false;
@@ -132,6 +158,7 @@ contract ENSAllowlistChecker is BaseAllowlistChecker, Ownable {
             if (!_alive(state)) return false;
 
             current = parent;
+            if (address(current) == address(ISSUER_REGISTRY)) throughIssuer = true;
         }
 
         return false;

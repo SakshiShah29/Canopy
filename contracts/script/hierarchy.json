@@ -3,38 +3,64 @@
     "The hierarchy the deploy script converges the chain to. Declarative and idempotent: run it",
     "again and it registers only what is missing.",
     "",
-    "BROKERS are infrastructure — each gets its own UserRegistry proxy, a name under the parent,",
-    "and setParent wired back. Add one here and re-run buildHierarchy().",
+    "FOUR LEVELS: canopy.eth (platform) -> issuer -> broker -> investor.",
+    "",
+    "ISSUERS are the platform's counterparties. Each gets a UserRegistry, a name under canopy.eth,",
+    "setParent wired back, and its OWN ENSAllowlistChecker bound to its own pool token. Give them a",
+    "long ttl: an issuer lapsing cascades to every broker and investor beneath it, which is a much",
+    "bigger event than the one we film.",
+    "",
+    "BROKERS are the issuer's distribution. A broker onboarded by two issuers appears TWICE, with",
+    "the same label under different issuers — that is the intended way to express it. The proxy salt",
+    "and the address-book key both include the issuer, so the two never collide.",
     "",
     "INVESTORS listed here are BOOTSTRAP ONLY. In the real flow they arrive via an application ->",
-    "CRE verdict -> MintAttestor -> SubnameRegistrar (beats 1-3). Keep this list to the few needed",
-    "before CRE exists, and to the two the demo needs guaranteed present. Adding everyone here",
-    "would bypass the product.",
+    "CRE verdict -> MintAttestor (beats 1-4). Keep this list to the few needed before CRE exists,",
+    "and to the ones the demo needs guaranteed present. Adding everyone here bypasses the product.",
     "",
     "wallet: leave empty to derive a deterministic placeholder. Placeholders CANNOT SIGN, so any",
-    "investor who has to transact on camera needs a real address here. Every investor must have a",
-    "distinct wallet — the checker stores one leaf per account.",
+    "investor who has to transact on camera needs a real address here. Wallets must be distinct",
+    "WITHIN an issuer — one checker holds one leaf per account — but the same wallet may legitimately",
+    "hold a name under both issuers.",
     "",
-    "ttl: seconds until the broker's name expires. 0 means take the BROKER_TTL env default, which",
-    "is what the demo shortens to film the lapse. Give brokers that must SURVIVE the lapse an",
-    "explicit long ttl — otherwise a global short TTL expires all of them at once and the cascade",
-    "looks like a kill switch rather than something scoped to one broker."
+    "ttl: seconds until the name expires. 0 means take the BROKER_TTL env default, which the demo",
+    "shortens to film the lapse. Only the broker being filmed should get the short value; give every",
+    "other broker an explicit long ttl, or a global short TTL expires all of them at once and the",
+    "cascade looks like a kill switch rather than something scoped to one issuer's one broker."
   ],
 
-  "brokers": [
+  "issuers": [
     {
-      "label": "brokerA",
-      "ttl": 0,
-      "investors": [
-        { "label": "alice", "wallet": "", "swap": true, "liquidity": false },
-        { "label": "mm", "wallet": "", "swap": true, "liquidity": true }
+      "label": "acme",
+      "ttl": 31536000,
+      "brokers": [
+        {
+          "label": "prime",
+          "ttl": 0,
+          "investors": [
+            { "label": "alice", "wallet": "", "swap": true, "liquidity": false },
+            { "label": "mm", "wallet": "", "swap": true, "liquidity": true }
+          ]
+        },
+        {
+          "label": "delta",
+          "ttl": 2592000,
+          "investors": []
+        }
       ]
     },
     {
-      "label": "brokerB",
-      "ttl": 2592000,
-      "investors": [
-        { "label": "bob", "wallet": "", "swap": true, "liquidity": false }
+      "label": "zenith",
+      "ttl": 31536000,
+      "brokers": [
+        {
+          "label": "prime",
+          "ttl": 7776000,
+          "investors": [
+            { "label": "bob", "wallet": "", "swap": true, "liquidity": false },
+            { "label": "mm2", "wallet": "", "swap": true, "liquidity": true }
+          ]
+        }
       ]
     }
   ]

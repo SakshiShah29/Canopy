@@ -77,13 +77,15 @@ contract Gate1HierarchyGasTest is Test {
             "alice", ALICE, IRegistry(address(0)), address(0), CanopyRoles.ROLE_ELIGIBLE_SWAP, EXPIRY
         );
 
-        checker1 = _deployChecker(IRegistry(address(brokerRegistry)));
-        checker2 = _deployChecker(IRegistry(address(issuerRegistry)));
-        checker3 = _deployChecker(IRegistry(address(ethRegistry)));
+        // `issuer` is the registry the walk must pass through. At depth 1 the walk terminates
+        // immediately at the broker registry, so that is also the registry it passes through.
+        checker1 = _deployChecker(IRegistry(address(brokerRegistry)), IRegistry(address(brokerRegistry)));
+        checker2 = _deployChecker(IRegistry(address(issuerRegistry)), IRegistry(address(issuerRegistry)));
+        checker3 = _deployChecker(IRegistry(address(ethRegistry)), IRegistry(address(issuerRegistry)));
     }
 
-    function _deployChecker(IRegistry anchor) internal returns (ENSAllowlistChecker c) {
-        c = new ENSAllowlistChecker(anchor, TOKEN, address(this));
+    function _deployChecker(IRegistry anchor, IRegistry issuer) internal returns (ENSAllowlistChecker c) {
+        c = new ENSAllowlistChecker(anchor, issuer, TOKEN, address(this));
         c.setAttestor(address(this));
         c.recordPath(ALICE, IPermissionedRegistry(address(brokerRegistry)), LibLabel.id("alice"));
     }

@@ -39,10 +39,15 @@ const ROLE_ELIGIBLE_SWAP = 1n << 64n
 const ROLE_ELIGIBLE_LIQUIDITY = 1n << 68n
 
 // ApplicationSubmitted(bytes32 indexed applicationId, address indexed wallet,
-//   address indexed issuer, address broker, string brokerPath, uint8 requestedTier)
+//   address indexed issuer, address broker, string brokerPath, string label,
+//   uint8 requestedTier)
+//
+// `issuer` and `brokerPath` are derived on-chain by ApplicationContract, not passed in by the
+// applicant — brokerPath is the rulebook key, so a caller who could name it would simply pick the
+// loosest policy in the book. `label` is what the applicant asked to be called.
 const APPLICATION_SUBMITTED_TOPIC = keccak256(
 	toHex(
-		toBytes('ApplicationSubmitted(bytes32,address,address,address,string,uint8)')
+		toBytes('ApplicationSubmitted(bytes32,address,address,address,string,string,uint8)')
 	)
 )
 
@@ -244,13 +249,14 @@ function checkChainalysis(
 	if (!ok(resp)) {
 		// If the oracle call fails, fail open is NOT acceptable for sanctions.
 		// Log and reject.
-		runtime.log('Chainalysis RPC call failed — defaulting to REJECT')
+		// Operational only: names the failing dependency, never the consequence for this applicant.
+		runtime.log('Chainalysis: RPC call failed')
 		return true // treat as sanctioned (fail closed)
 	}
 
 	const rpcResult = JSON.parse(text(resp))
 	if (rpcResult.error || !rpcResult.result) {
-		runtime.log('Chainalysis RPC returned error — defaulting to REJECT')
+		runtime.log('Chainalysis: RPC returned an error')
 		return true
 	}
 
@@ -436,16 +442,22 @@ export const onApplicationSubmitted = (
 	// ── Step 1: Decode the trigger event ──
 	// Indexed params: topics[0]=eventSig, topics[1]=applicationId,
 	//                 topics[2]=wallet, topics[3]=issuer
-	// Non-indexed: (address broker, string brokerPath, uint8 requestedTier)
+	// Non-indexed: (address broker, string brokerPath, string label, uint8 requestedTier)
 	const wallet = topicToAddress(log.topics[2])
+
+	// The issuer is not read here on purpose. ApplicationContract derives both the issuer and the
+	// brokerPath from the broker's registry, so they cannot disagree — and MintAttestor derives the
+	// issuer again on-chain to pick the checker. Nothing this handler decides depends on it.
 	const _issuer = topicToAddress(log.topics[3])
 
-	const [broker, brokerPath, requestedTier] = decodeAbiParameters(
-		parseAbiParameters('address broker, string brokerPath, uint8 requestedTier'),
+	const [broker, brokerPath, label, requestedTier] = decodeAbiParameters(
+		parseAbiParameters('address broker, string brokerPath, string label, uint8 requestedTier'),
 		bytesToHexStr(log.data),
 	)
 
-	runtime.log(`Processing application: wallet=${wallet}, brokerPath=${brokerPath}`)
+	runtime.log(
+		`Processing application: wallet=${wallet}, brokerPath=${brokerPath}, label=${label}`
+	)
 
 	// ── Step 2: Fetch all secrets inside the enclave ──
 	// The Vault DON releases these only into an attested enclave.
@@ -497,14 +509,19 @@ export const onApplicationSubmitted = (
 		nowSeconds,
 	)
 
-	runtime.log(
-		`Verdict: approved=${verdict.approved}${verdict.reason ? ` reason=${verdict.reason}` : ''}`
-	)
+	// Deliberately not logged. `verdict.reason` names the factor that decided the case
+	// (SCORE_BELOW_THRESHOLD, MIXER_ASSOCIATED, WALLET_TOO_NEW), and "which specific factors caused
+	// a rejection" is on the confidential side of our own boundary — logging it here would be the
+	// one place our code contradicts the claim the whole design rests on. CRE's guidance is the
+	// same: avoid logging inside enclave execution logic.
+	//
+	// The binary verdict is public regardless: it rides out in the report's `approved` field.
 
-	// ── Step 9: Derive label ──
-	// Use the lower 8 hex chars of the wallet as the subname label.
-	// This caps at 8 bytes, well within the 32-byte limit.
-	const label = wallet.slice(2, 18).toLowerCase()
+	// ── Step 9: The label ──
+	// Comes from the application, not derived here. ApplicationContract has already checked that it
+	// is 1–32 bytes and not already live under this broker, so it fits the report's bytes32 and can
+	// actually be minted. Deriving it from the wallet would produce names like
+	// `d8da6bf26964af9d.prime.acme.canopy.eth` instead of `alice.prime.acme.canopy.eth`.
 	const labelBytes = stringToHex(label, { size: 32 })
 
 	// ── Step 10: Encode the report tuple ──
@@ -558,7 +575,9 @@ export const onApplicationSubmitted = (
 		})
 		.result()
 
-	return verdict.approved ? 'APPROVED' : `REJECTED:${verdict.reason ?? 'UNKNOWN'}`
+	// Same reasoning as above: the return value surfaces in simulation output, so it carries the
+	// verdict and not the reason for it.
+	return verdict.approved ? 'APPROVED' : 'REJECTED'
 }
 
 // ─── Workflow Init ──────────────────────────────────────────
@@ -575,7 +594,12 @@ export function initWorkflow(config: Config) {
 		logTriggerConfig({
 			addresses: [config.applicationContractAddress as `0x${string}`],
 			topics: [[APPLICATION_SUBMITTED_TOPIC]],
-			confidence: 'FINALIZED',
+			// LATEST, not FINALIZED. Finality on Sepolia is two epochs — about 13 minutes — which
+			// is the gap between an applicant pressing Submit and their subname appearing. That is
+			// fine for a compliance system and fatal for a live demo, where beat 1 has to land
+			// while someone is watching. A reorg would at worst mint a subname for an application
+			// that no longer exists on-chain, and the name still expires on its own.
+			confidence: 'LATEST',
 		})
 	)
 
