@@ -44,12 +44,29 @@ Verification work originally scheduled for Sep 4 has already been completed by r
 
 **Only Gate 5 remains, and it cannot force a pivot** — it has a known fallback (Confidential HTTP).
 
-**Gate 5 now answers two more questions [new Sep 6]**, both cheap to check while you are in there:
-- Can the enclave perform an **EVM read**, or are reads only available after `usingTheDons()`?
-- Must a value fetched inside the enclave be **byte-identical across nodes** for report consensus?
+**Both of Gate 5's follow-up questions are answered from the docs [resolved Sep 7]** — no experiment
+needed:
 
-Both feed the policy design (see "Where policy lives"). Neither can block it — the hash comparison
-uses only public values, so it can move outside the enclave if the answers are unfavourable.
+- **The enclave cannot do EVM reads.** *"Workflow triggers, chain reads, and chain writes… always
+  execute on Workflow DON nodes, never inside the enclave."* So `EVMClient.callContract` inside
+  `handlerInTee` is unavailable, and the HTTP `eth_call` the workflow uses for the Chainalysis
+  oracle is the only route to on-chain data from inside the boundary — not the cautious choice, the
+  only one. The same technique reads the `canopy:policy` text record when policy-hash verification
+  lands.
+- **In-enclave fetches do not need to be deterministic across nodes.** *"Trust derives from enclave
+  attestation, not DON consensus."* One attested enclave does the work, so `Date.now()` in the
+  GoPlus signature and in `expiry` is fine.
+
+⚠️ **A third thing the docs say, which the workflow currently violates:** *"Logging within enclave
+execution logic should be avoided in production workflows."* `workflow.ts` logs the verdict
+**reason** (`SCORE_BELOW_THRESHOLD`, `MIXER_ASSOCIATED`, …) from inside the TEE handler — and
+`cre/CRE-IMPLEMENTATION.md`'s own confidentiality table lists *which specific factors caused a
+rejection* as protected. That one line is the only place our own confidentiality claim is
+contradicted by our own code.
+
+**Confidential workflows are simulation-only in the beta.** That is why we run on
+`MockKeystoneForwarder`, and it is what the video has to say — a *simulated* confidential workflow
+broadcasting real transactions, not a deployed one.
 
 ---
 
@@ -97,13 +114,29 @@ These are the only things that cross the boundary. Agree them in today's first h
    ```solidity
    event ApplicationSubmitted(
        bytes32 indexed applicationId,
-       address indexed wallet,
-       address indexed issuer,      // which issuer's registry — and therefore which pool
+       address indexed wallet,      // always msg.sender
+       address indexed issuer,      // DERIVED — which issuer's registry, and therefore which pool
        address broker,              // which broker's registry the applicant applies through
-       string  brokerPath,          // "acme/prime" — the policy key, see "Where policy lives"
+       string  brokerPath,          // DERIVED — "acme/prime", the policy key
+       string  label,               // the subname requested
        uint8   requestedTier        // 0 = retail (swap), 1 = market maker (swap + liquidity)
    );
    ```
+
+   Emitted by **`contracts/src/cre/ApplicationContract.sol`** (Builder A). CRE's `logTrigger`
+   filters on a contract address, so a backend endpoint cannot emit this — it sends a transaction
+   to a contract that does. This is the entrance to the flow; `MintAttestor` is the exit.
+
+   **`issuer` and `brokerPath` are derived on-chain, not passed in [changed Sep 7].** The contract
+   walks `getParent()` from the broker's registry to the platform root (`LibCanopyPath`). This is
+   not tidiness: `brokerPath` is the key into the confidential rulebook, so a caller who could name
+   it would pick the loosest entry in the book — be evaluated under `zenith/_default` while being
+   minted into a broker whose real policy is far stricter. The mint would land correctly and the
+   *evaluation* would be wrong, which is the hardest kind of hole to notice.
+
+   `submitApplication(address broker, string label, uint8 requestedTier)` is therefore the whole
+   signature. `wallet` is `msg.sender`, so an applicant proves control of the address they are
+   applying for; a `wallet` parameter would let anyone apply in someone else's name.
 
    Contains **no PII** — triggers run on Workflow DON nodes, not in the enclave. Issuer, broker and
    broker path are not PII, so carrying them here is safe.
@@ -204,7 +237,7 @@ names for one wallet, and **each requires its own application** — see below.
 | `canopy.eth` | the platform — `DeployIssuerHierarchy` | no |
 | `acme`, `zenith` | the platform — `DeployIssuerHierarchy` | no |
 | `prime`, `delta`, … under each issuer | **the issuer** — `DeployIssuerHierarchy` | no |
-| `alice`, `mm`, `bob`, … | `SubnameRegistrar`, on a CRE verdict | **yes** |
+| `alice`, `mm`, `bob`, … | `MintAttestor`, on a CRE verdict | **yes** |
 
 **Issuers are onboarded by the platform.** A commercial contract; the root of trust has to sit
 somewhere. Not a CRE decision, and deliberately so.
@@ -231,7 +264,7 @@ never evaluated — which is the first thing a judge probes. Alice wanting Zenit
 and Zenith's policy gets a say.
 
 **Only a CRE verdict can mint eligibility.** The broker never sends the transaction;
-`SubnameRegistrar` does, holding `ROLE_REGISTRAR` on each broker registry. A broker cannot onboard a
+`MintAttestor` does, holding `ROLE_REGISTRAR` on each broker registry. A broker cannot onboard a
 client who failed the check. That is what makes the cascade meaningful: a broker controls nothing
 about eligibility except their own name staying alive, and when it lapses everyone they introduced
 goes with them.
@@ -746,9 +779,10 @@ is the registrar's floor and applies *only* to the parent; subnames have no mini
 
 Then build the hierarchy — note subname registration is **the other call**, with an absolute expiry, no payment and no commit–reveal:
 
-> **[changed Sep 6] The tree is now four levels.** Steps 1–4 build the platform root, step 5 is new
-> and builds the issuers, and steps 6–8 repeat per issuer instead of once. The script phase list
-> becomes `commitParent() → registerParent() → buildIssuers() → buildHierarchy() → deployCheckers()`.
+> **[changed Sep 6, built Sep 7] The tree is now four levels.** Steps 1–4 build the platform root,
+> step 5 builds the issuers, and steps 6–8 repeat per issuer instead of once. The script phase list
+> is `commitParent() → registerParent() → buildIssuers() → buildHierarchy() → deployCheckers()`,
+> plus `grantAttestor(address)` on Day 4. `./script/deploy-hierarchy.sh` runs all of it.
 
 1. Deploy `PlatformRootRegistry` (a `UserRegistry`) via `VerifiableFactory` (`0x894bc9cc…`)
    — **renamed from `IssuerRootRegistry`**, which now means something else
@@ -768,9 +802,10 @@ Then build the hierarchy — note subname registration is **the other call**, wi
    Each grant is `(address account, uint256 roleBitmap)`. Include at minimum
    `ROLE_REGISTRAR_ADMIN | ROLE_RENEW_ADMIN` for the deployer.
 
-   **Use the array to pre-grant `SubnameRegistrar`'s `ROLE_REGISTRAR` here**, rather than a
-   separate `grantRootRoles` call on Day 4. That is one fewer transaction and it sidesteps the
-   `_ADMIN` trap below at the one place you were most likely to hit it.
+   **`ROLE_REGISTRAR_ADMIN` is the load-bearing entry.** `grantRootRoles` requires the `_ADMIN`
+   twin of the role being granted, so this is what lets Day 4 hand `MintAttestor` its minting
+   rights. Without it the grant is impossible after deployment and the registry has to be
+   rebuilt.
 
    **[new Sep 6] Do this on every *issuer* registry too, not only broker registries.** Nothing this
    week mints into an issuer registry — brokers are registered by their issuer directly. Grant it
@@ -861,13 +896,19 @@ Then build the hierarchy — note subname registration is **the other call**, wi
    "Cross-issuer isolation" — without it, every issuer's checker admits every other issuer's
    investors.
 
-   `PERMISSIONED_TOKEN` is **immutable** and there are now two of them, one per issuer. If Builder
-   B's addresses are not ready, verify with throwaway checkers bound to any address and pass the same
-   address to `checkAllowlist`; that tests the walk without waiting.
+   `PERMISSIONED_TOKEN` is **immutable** and there are now two of them, one per issuer, read from
+   `PERMISSIONED_TOKEN_ACME` / `PERMISSIONED_TOKEN_ZENITH`. They are separate variables on purpose:
+   two checkers bound to the same token would answer for each other's pool and quietly undo the
+   isolation. If Builder B's addresses are not ready, each falls back to a per-issuer placeholder
+   and prints a warning; that tests the walk without waiting.
+
+   **`resetBroker` now takes `(issuer, broker)`** — `ISSUER=acme BROKER=prime` for the shell
+   driver. A broker label can appear under several issuers, and re-arming the wrong one silently
+   resets the broker that is supposed to *survive* the filmed lapse.
 
 **Trap:** `grantRootRoles` requires the `_ADMIN` variant of the role being granted. Still applies to
 anything granted *after* deployment — getting it wrong is fatal to the registration path and subtle
-to debug (risk #10). Step 2's grant array is how you avoid needing it at all for `SubnameRegistrar`.
+to debug (risk #10). Step 2's grant array is what makes `grantAttestor(address)` possible on Day 4.
 
 Write `script/DeployIssuerHierarchy.s.sol` so this is repeatable and idempotent. You will run it many times.
 
@@ -984,14 +1025,55 @@ function _processReport(bytes calldata metadata, bytes calldata report) internal
 **`kind` is decoded and rejected unless it is `KIND_INVESTOR`.** Nothing else is ever emitted — this
 is a decode guard, not a feature flag. See interface contract item 1.
 
-**`contracts/src/registrar/SubnameRegistrar.sol`** — flat params matching the report, `onlyAttestor`, calling `IPermissionedRegistry.register` into the broker's registry.
+**`SubnameRegistrar` no longer exists [changed Sep 7].** `MintAttestor` calls
+`IPermissionedRegistry.register` directly. The registrar never held logic of its own — it was a
+pass-through with an `onlyAttestor` modifier — so collapsing the two removes a contract and a hop
+without changing what is enforced.
+
+**The grant moves with it: `MintAttestor` needs `ROLE_REGISTRAR` on every broker registry.** Run
+`DeployIssuerHierarchy --sig "grantAttestor(address)"`, which also calls `setAttestor` on the
+checker. Missing either half fails at the first real mint and reads as a checker bug.
 
 Then: deploy the attestor and registrar, register **every** issuer's checker in `checkerOf`, and
 point **each existing checker** (deployed Sep 6) at the attestor with `setAttestor` — replacing the
 deployer EOA it was initialized with. Redeploy a checker only if it is still bound to a throwaway
 token.
 
-`SubnameRegistrar` needs `ROLE_REGISTRAR` on each broker registry. If Sep 6's grant array already included it, there is nothing to do; otherwise grant it via `grantRootRoles`, which needs the `_ADMIN` variant.
+**`allowedWorkflowId` fails closed [new Sep 7].** The attestor rejects *every* report until
+`setWorkflow(bytes32)` is called, because the workflow id does not exist until the workflow is
+deployed. A permissive default would leave a live attestor accepting reports from any workflow on
+the same forwarder during that window — which is the security-relevant line in the contract.
+
+### Forwarders and ERC-165 — resolved Sep 7
+
+| | Address | Used by |
+|---|---|---|
+| `MockKeystoneForwarder` | `0x15fC6ae953E024d975e77382eEeC56A9101f9F88` | `cre workflow simulate --broadcast` — **ours** |
+| `KeystoneForwarder` (production) | `0xF8344CFd5c43616a4366C34E3EEE75af79a74482` | a deployed workflow |
+
+**We run on the mock, and that is correct rather than a shortcut.** Confidential workflows are in
+private beta and support simulation only, so `simulate --broadcast` is how reports reach Sepolia.
+
+⚠️ **ERC-165 is required, and its absence is invisible to us.** `KeystoneForwarder` calls
+`supportsInterface(type(IReceiver).interfaceId)` before delivering; a receiver that does not answer
+never receives a report. **The mock does not make that call** — confirmed by reading both deployed
+bytecodes: `01ffc9a7` appears in the production forwarder and not in the mock, and neither
+implements ERC-165 itself, so that constant is there to *call* receivers with. A missing
+`supportsInterface` would therefore pass every demo we run and fail the moment the beta opens.
+`MintAttestor` implements it, and a test pins `type(IReceiver).interfaceId == 0x805f2132`.
+
+**Metadata layout** — 64 packed bytes, workflow id first, so `bytes32(metadata[:32])` is right:
+
+| offset | size | field |
+|---|---|---|
+| 0 | 32 | `workflowId` |
+| 32 | 10 | `workflowName` |
+| 42 | 20 | `workflowOwner` |
+| 62 | 2 | `reportId` |
+
+The attestor requires only 32 bytes, not 64 — it validates the workflow id and nothing else, and
+requiring more than it reads would make it depend on the mock and production forwarders packing
+identically.
 
 ### 🅱️ Builder B — the confidential workflow
 
@@ -1054,7 +1136,7 @@ Run everything with `--broadcast`.
 
 ### 🔀 Sync — end of day
 
-**Done when this full chain works:** `cre workflow simulate --broadcast` → APPROVE verdict → forwarder tx on Sepolia → `MintAttestor.onReport` → `SubnameRegistrar` mints the subname → `acmeChecker.checkAllowlist(alice, acmeToken)` returns `SWAP_ALLOWED` **and `zenithChecker.checkAllowlist(alice, zenithToken)` returns `NONE`.**
+**Done when this full chain works:** `cre workflow simulate --broadcast` → APPROVE verdict → forwarder tx on Sepolia → `MintAttestor.onReport` mints the subname and records the leaf → `acmeChecker.checkAllowlist(alice, acmeToken)` returns `SWAP_ALLOWED` **and `zenithChecker.checkAllowlist(alice, zenithToken)` returns `NONE`.**
 
 If the chain breaks, debug from the on-chain end backwards — the forwarder tx hash in the CRE output tells you whether the problem is before or after the chain boundary.
 

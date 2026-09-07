@@ -53,7 +53,9 @@ contract ENSAllowlistCheckerTest is Test {
         issuerRegistry = new MockRegistry();
         brokerARegistry = new MockRegistry();
 
-        checker = new ENSAllowlistChecker(IRegistry(address(ethRegistry)), TOKEN, OWNER);
+        checker = new ENSAllowlistChecker(
+            IRegistry(address(ethRegistry)), IRegistry(address(issuerRegistry)), TOKEN, OWNER
+        );
         vm.prank(OWNER);
         checker.setAttestor(ATTESTOR);
 

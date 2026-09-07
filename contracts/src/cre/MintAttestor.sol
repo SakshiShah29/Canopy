@@ -7,87 +7,91 @@ import {IRegistry} from "@ens/registry/interfaces/IRegistry.sol";
 import {IPermissionedRegistry} from "@ens/registry/interfaces/IPermissionedRegistry.sol";
 import {LibLabel} from "@ens/utils/LibLabel.sol";
 
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+
 import {ENSAllowlistChecker} from "../checker/ENSAllowlistChecker.sol";
+import {IReceiver} from "./IReceiver.sol";
+import {LibCanopyPath} from "./LibCanopyPath.sol";
 
-// ─── Chainlink CRE IReceiver interface ───────────────────────
-// Copied verbatim from Chainlink docs. Implementations must support ERC165.
-interface IReceiver is IERC165 {
-    function onReport(bytes calldata metadata, bytes calldata report) external;
-}
-
-/// @title CRE Report Receiver — mints investor subnames from DON-attested verdicts
+/// @title CRE report receiver — mints investor subnames from DON-attested verdicts
 ///
-/// @notice The Chainlink Workflow DON delivers signed reports here via the KeystoneForwarder
-///         (`0xF8344CFd5c43616a4366C34E3EEE75af79a74482` on Sepolia).
+/// @notice The Chainlink Workflow DON delivers signed reports here through the KeystoneForwarder.
+///         Each report carries a verdict produced inside an AWS Nitro enclave. On APPROVE this
+///         contract registers the investor's subname in the broker's registry and records the leaf
+///         in that **issuer's** checker. On REJECT it is a silent no-op — the DON still needs the
+///         transaction to settle, so reverting would be wrong.
 ///
-///         Each report encodes a verdict tuple produced inside an AWS Nitro enclave by the
-///         canopy-eligibility CRE workflow. If the verdict is APPROVED, this contract:
+/// @dev Three boundaries, in the order they are checked:
+///      1. `onlyForwarder` — only the KeystoneForwarder may deliver.
+///      2. `allowedWorkflowId` — the report must come from *our* workflow. `ReceiverTemplate`
+///         decodes metadata but does not validate it, so this check is ours to add: without it any
+///         workflow routed through the same forwarder could mint subnames.
+///      3. `kind` — a decode guard. `abi.decode` of a differently shaped payload can succeed and
+///         yield garbage rather than revert, so the shape is asserted before it is acted on.
 ///
-///           1. Registers the investor subname in the broker's registry
-///           2. Records the leaf in the ENSAllowlistChecker so the pool recognizes the wallet
-///
-///         If REJECTED, the call is a no-op (no revert — the DON still needs the tx to settle).
-///
-/// @dev Security:
-///      - `onlyForwarder`: only the KeystoneForwarder can call `onReport`
-///      - `allowedWorkflow`: the metadata's workflowId must match the registered workflow
-///      - The report tuple is the ONLY data that crosses the enclave confidentiality boundary
-///
-/// @dev Metadata layout (64 bytes, abi.encodePacked):
-///      | Offset | Size | Field          |
-///      |--------|------|----------------|
-///      | 0-31   | 32   | workflowId     |
-///      | 32-41  | 10   | workflowName   |
-///      | 42-61  | 20   | workflowOwner  |
-///      | 62-63  | 2    | reportId       |
+///      Implements `IReceiver` directly rather than inheriting Chainlink's `ReceiverTemplate`,
+///      which the docs sanction ("you control your own security checks") and which avoids vendoring
+///      a repository we do not otherwise depend on. The one thing that cannot be skipped is
+///      **ERC-165** — see `IReceiver` for why its absence is invisible in simulation.
 contract MintAttestor is IReceiver {
     // ── Errors ───────────────────────────────────────────────────
     error OnlyForwarder(address caller);
+    error WorkflowNotSet();
     error UnexpectedWorkflow(bytes32 actual);
+    error MalformedMetadata(uint256 length);
     error UnsupportedKind(uint8 kind);
+    error SubnameAlreadyRegistered(address subject);
+    error NoCheckerForIssuer(address issuerRegistry);
+    error NotOwner(address caller);
 
     // ── Events ───────────────────────────────────────────────────
-    event VerdictReceived(
-        address indexed subject,
-        bool    approved,
-        uint256 roleBitmap,
-        uint64  expiry
-    );
+    event VerdictReceived(address indexed subject, bool approved, uint256 roleBitmap, uint64 expiry);
+    event SubnameMinted(address indexed subject, address indexed parentRegistry, address indexed issuerRegistry);
+    event CheckerSet(address indexed issuerRegistry, address checker);
+    event AllowedWorkflowIdSet(bytes32 workflowId);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     // ── Constants ────────────────────────────────────────────────
     uint8 internal constant KIND_INVESTOR = 0;
 
     // ── Immutables ───────────────────────────────────────────────
     /// @notice The KeystoneForwarder — the only address that can deliver reports.
-    address public immutable forwarder;
+    address public immutable FORWARDER;
 
-    /// @notice The owner who can update configuration.
+    /// @notice The platform root registry, used to locate a broker's issuer. See `LibCanopyPath`.
+    IRegistry public immutable PLATFORM_REGISTRY;
+
+    // ── Storage ──────────────────────────────────────────────────
     address public owner;
 
-    /// @notice The expected CRE workflow ID. Reports from any other workflow are rejected.
+    /// @notice The CRE workflow permitted to mint. **Reports are rejected until this is set.**
     bytes32 public allowedWorkflowId;
 
-    /// @notice The ENSAllowlistChecker that the pool reads for eligibility.
-    ENSAllowlistChecker public checker;
+    /// @notice One checker per issuer — eligibility is issuer-scoped, so the leaf has to be
+    ///         recorded in the checker that answers for that issuer's pool.
+    mapping(address issuerRegistry => ENSAllowlistChecker) public checkerOf;
 
-    // ── Constructor ──────────────────────────────────────────────
-    /// @param _forwarder The KeystoneForwarder address on this chain.
-    /// @param _checker   The deployed ENSAllowlistChecker (address(0) if not yet deployed).
-    /// @param _owner     The admin who can update allowedWorkflowId.
-    constructor(address _forwarder, address _checker, address _owner) {
-        forwarder = _forwarder;
-        checker = ENSAllowlistChecker(_checker);
-        owner = _owner;
+    constructor(address forwarder, IRegistry platformRegistry, address initialOwner) {
+        FORWARDER = forwarder;
+        PLATFORM_REGISTRY = platformRegistry;
+        owner = initialOwner;
+        emit OwnershipTransferred(address(0), initialOwner);
     }
 
     modifier onlyForwarder() {
-        if (msg.sender != forwarder) revert OnlyForwarder(msg.sender);
+        if (msg.sender != FORWARDER) revert OnlyForwarder(msg.sender);
         _;
     }
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "not owner");
+        if (msg.sender != owner) revert NotOwner(msg.sender);
         _;
+    }
+
+    // ── ERC165 ────────────────────────────────────────────────────
+    function supportsInterface(bytes4 interfaceId) public pure override returns (bool) {
+        return interfaceId == type(IReceiver).interfaceId
+            || interfaceId == type(IERC165).interfaceId;
     }
 
     // ── ERC165 ────────────────────────────────────────────────────
@@ -98,89 +102,132 @@ contract MintAttestor is IReceiver {
 
     // ── Admin ────────────────────────────────────────────────────
 
-    /// @notice Set the allowed CRE workflow ID. Reports from any other workflow are rejected.
+    /// @notice Set the workflow permitted to mint. Until this is called, every report reverts.
     function setAllowedWorkflowId(bytes32 id) external onlyOwner {
         allowedWorkflowId = id;
+        emit AllowedWorkflowIdSet(id);
     }
 
-    /// @notice Update the checker address (in case a new checker is deployed).
-    function setChecker(address _checker) external onlyOwner {
-        checker = ENSAllowlistChecker(_checker);
+    /// @notice Point an issuer at the checker that answers for its pool.
+    /// @dev The checker must also be pointed back here with `ENSAllowlistChecker.setAttestor`,
+    ///      since `recordPath` is `onlyAttestor`. That call is the checker owner's to make — it
+    ///      cannot be done from here, and forgetting it is the most likely way to break minting.
+    function setChecker(address issuerRegistry, ENSAllowlistChecker checker) external onlyOwner {
+        checkerOf[issuerRegistry] = checker;
+        emit CheckerSet(issuerRegistry, address(checker));
     }
 
-    /// @notice Transfer ownership.
     function transferOwnership(address newOwner) external onlyOwner {
+        emit OwnershipTransferred(owner, newOwner);
         owner = newOwner;
     }
 
-    // ── IReceiver ────────────────────────────────────────────────
+    // ── ERC-165 ──────────────────────────────────────────────────
 
-    /// @notice Called by the KeystoneForwarder with a DON-signed report.
-    /// @param metadata 64 bytes: workflowId (32) || workflowName (10) || workflowOwner (20) || reportId (2)
+    /// @inheritdoc IERC165
+    /// @dev `KeystoneForwarder` calls this before delivering, and skips receivers that do not
+    ///      answer `true` for `IReceiver`. Omitting it is invisible until production: the mock
+    ///      forwarder used by `cre workflow simulate --broadcast` never asks.
+    function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
+        return interfaceId == type(IReceiver).interfaceId || interfaceId == type(IERC165).interfaceId;
+    }
+
+    // ── Report receiver ──────────────────────────────────────────
+
+    /// @inheritdoc IReceiver
+    /// @param metadata Packed workflow identity; see `IReceiver` for the full 64-byte layout. Only
+    ///                 the leading `workflowId` is read — `workflowName`, `workflowOwner` and
+    ///                 `reportId` sit at offsets 32, 42 and 62 if they are ever wanted.
     /// @param report   ABI-encoded verdict tuple from the enclave.
-    function onReport(bytes calldata metadata, bytes calldata report) external override onlyForwarder {
-        // ── Validate workflow ID ──
-        if (allowedWorkflowId != bytes32(0)) {
-            bytes32 workflowId = bytes32(metadata[:32]);
-            if (workflowId != allowedWorkflowId) revert UnexpectedWorkflow(workflowId);
-        }
+    function onReport(bytes calldata metadata, bytes calldata report) external onlyForwarder {
+        // ── 1. The report must come from our workflow ──
+        // Fail closed: an unset id rejects everything rather than accepting everything. There is a
+        // window between deploying this contract and registering the workflow, and during it a
+        // permissive default would let any workflow on the same forwarder mint subnames.
+        if (allowedWorkflowId == bytes32(0)) revert WorkflowNotSet();
+        // 32, not the full 64: the workflow id is all we validate, and requiring more than we read
+        // would make this depend on the mock and production forwarders packing metadata
+        // identically — which is exactly the kind of difference that shows up only in production.
+        if (metadata.length < 32) revert MalformedMetadata(metadata.length);
 
-        // ── Decode the verdict tuple ──
-        // Matches the encodeAbiParameters in workflow.ts exactly:
-        //   (uint8 kind, address subject, bytes32 labelBytes, address parentRegistry,
-        //    uint256 roleBitmap, uint64 expiry, bool approved)
+        bytes32 workflowId = bytes32(metadata[:32]);
+        if (workflowId != allowedWorkflowId) revert UnexpectedWorkflow(workflowId);
+
+        // ── 2. Decode the verdict ──
+        // Must match `encodeAbiParameters` in cre/eligibility-workflow/workflow.ts exactly.
         (
-            uint8   kind,
+            uint8 kind,
             address subject,
             bytes32 labelBytes,
             address parentRegistry,
             uint256 roleBitmap,
-            uint64  expiry,
-            bool    approved
+            uint64 expiry,
+            bool approved
         ) = abi.decode(report, (uint8, address, bytes32, address, uint256, uint64, bool));
 
         emit VerdictReceived(subject, approved, roleBitmap, expiry);
 
-        // ── REJECT is a silent no-op ──
+        // A rejection is a no-op on-chain. Nothing is written, and the transaction still settles.
         if (!approved) return;
 
-        // ── Guard: only investor kind ──
         if (kind != KIND_INVESTOR) revert UnsupportedKind(kind);
 
-        // ── Register the investor subname ──
+        // ── 3. Which issuer's checker? Ask the chain, not the report ──
+        // The report chooses where the name is minted; the hierarchy above that registry decides
+        // which pool the eligibility is good for. Reading the issuer here rather than trusting a
+        // field means a workflow that produced a bad report still cannot direct eligibility into
+        // an unrelated issuer's pool.
+        address issuerRegistry = LibCanopyPath.issuerOf(PLATFORM_REGISTRY, IRegistry(parentRegistry));
+        ENSAllowlistChecker checker = checkerOf[issuerRegistry];
+        if (address(checker) == address(0)) revert NoCheckerForIssuer(issuerRegistry);
+
+        // ── 4. Register the subname, unless it is already live ──
         string memory label = _bytes32ToString(labelBytes);
         uint256 labelhash = LibLabel.id(label);
 
-        // Idempotent: skip if subname already exists and is alive
-        IPermissionedRegistry.State memory state = IPermissionedRegistry(parentRegistry).getState(labelhash);
-        if (state.status == IPermissionedRegistry.Status.REGISTERED && state.expiry > block.timestamp) {
-            return;
+        IPermissionedRegistry registry = IPermissionedRegistry(parentRegistry);
+        IPermissionedRegistry.State memory state = registry.getState(labelhash);
+
+        bool alive = state.status == IPermissionedRegistry.Status.REGISTERED && state.expiry > block.timestamp;
+
+        if (alive) {
+            // Someone else already holds this name under this broker. `ApplicationContract` rejects
+            // this case up front, so reaching it means the name was taken between application and
+            // delivery.
+            if (state.latestOwner != subject) revert SubnameAlreadyRegistered(subject);
+        } else {
+            registry.register(
+                label,
+                subject,
+                IRegistry(address(0)), // an investor leaf has no subregistry
+                address(0), // and no resolver
+                roleBitmap,
+                expiry
+            );
         }
 
-        // Register: label, owner=subject, no subregistry, no resolver, roles, expiry
-        IPermissionedRegistry(parentRegistry).register(
-            label,
-            subject,
-            IRegistry(address(0)),  // no sub-subregistry
-            address(0),             // no resolver
-            roleBitmap,
-            expiry
-        );
+        // ── 5. Record the leaf ──
+        // Deliberately outside the branch above. A checker redeployment (PERMISSIONED_TOKEN is
+        // immutable, so it happens) leaves the name registered but the new checker empty; running
+        // the same verdict again must be able to repair that rather than return early.
+        checker.recordPath(subject, registry, labelhash);
 
-        // ── Record the leaf in the checker ──
-        if (address(checker) != address(0)) {
-            checker.recordPath(subject, IPermissionedRegistry(parentRegistry), labelhash);
-        }
+        emit SubnameMinted(subject, parentRegistry, issuerRegistry);
     }
 
     // ── Helpers ──────────────────────────────────────────────────
 
-    /// @dev Convert a right-padded bytes32 to a string (stops at first null byte).
+    /// @dev Right-padded `bytes32` back to a string. The report is a flat tuple and `register`
+    ///      needs a `string`, so the label travels as itself rather than as a hash — a hash could
+    ///      not be reversed. Trailing zero bytes are the padding.
     function _bytes32ToString(bytes32 b) internal pure returns (string memory) {
-        uint256 len = 0;
+        uint256 len;
         while (len < 32 && b[len] != 0) len++;
+
         bytes memory s = new bytes(len);
-        for (uint256 i = 0; i < len; i++) s[i] = b[i];
+        for (uint256 i = 0; i < len; i++) {
+            s[i] = b[i];
+        }
         return string(s);
     }
 }

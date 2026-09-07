@@ -19,16 +19,40 @@ import {ENSAllowlistChecker} from "../../src/checker/ENSAllowlistChecker.sol";
 /// @dev This exists because the live sequence is expensive to debug: the parent registration is
 ///      commit–reveal with a 60-second gap, several calls are role-gated in ways that fail
 ///      opaquely, and a mistake in the middle leaves half a hierarchy on-chain that the next run
-///      has to reason about. Everything here uses the real deployed contracts and real state, so a
-///      pass means the only things left to go wrong live are gas and the RPC.
+///      has to reason about. Everything uses the real deployed contracts and real state, so a pass
+///      means the only things left to go wrong live are gas and the RPC.
 ///
 ///      The one thing a fork cannot rehearse is the *wall-clock* commitment wait; `vm.warp` stands
-///      in for it. That is also the only difference from what runs tomorrow.
+///      in for it. That is the only difference from what runs on Sepolia.
+///
+///      The tree under test is the one in `script/hierarchy.json`:
+///
+///        canopy (platform)
+///        ├── acme   ── prime ── alice, mm
+///        │          └─ delta
+///        └── zenith ── prime ── bob, mm2
+///
+///      `prime` appears twice on purpose: the same broker onboarded by two issuers. It is what
+///      makes containment testable, and it is where a shared proxy salt would collapse two
+///      registries into one.
+///
+/// @dev **This is deliberately a single test function.** The deployment writes its address book to
+///      the filesystem and reads configuration from environment variables, and neither is rolled
+///      back between tests — while forge runs tests concurrently. Split into several tests, one
+///      `setUp` truncates the address book while a sibling is midway through writing it, and
+///      `vm.setEnv` (process-wide) leaks whichever value was set last into everyone else. Both
+///      present as a phase failing to find something it definitely just deployed, which sends you
+///      hunting in entirely the wrong place. One test, built once, with `snapshotState` between
+///      scenarios, has neither problem.
 contract HierarchyRehearsalTest is Test {
     DeployIssuerHierarchy internal deployScript;
 
     uint256 internal constant DEPLOYER_KEY = 0xA11CE5EED;
     address internal deployer;
+
+    string internal constant DEPLOYMENTS = "./out/rehearsal-deployments.json";
+
+    address internal constant ETH_REGISTRY = 0x1D78834d97c1D7b1A38c1deDBD1a287cFEd3971e;
 
     /// @dev Mirrors the script's placeholder derivation for an investor with no configured wallet.
     ///      `script/hierarchy.json` ships with empty wallets, so every bootstrap investor lands on
@@ -45,131 +69,171 @@ contract HierarchyRehearsalTest is Test {
         vm.deal(deployer, 10 ether);
 
         vm.setEnv("DEPLOYER_PRIVATE_KEY", vm.toString(DEPLOYER_KEY));
-        vm.setEnv("DEPLOYMENTS_PATH", "./out/rehearsal-deployments.json");
+        vm.setEnv("DEPLOYMENTS_PATH", DEPLOYMENTS);
         // A label nobody has taken on the shared testnet deployment. The rehearsal registers for
-        // real on the fork, so a collision with another team would make this fail for the wrong
-        // reason.
+        // real on the fork, so a collision with another team would fail this for the wrong reason.
         vm.setEnv("COMMIT_NONCE", vm.toString(block.timestamp));
-        // vm.setEnv is process-wide, so a value set by one test would otherwise leak into the
-        // next depending on execution order. Pin the defaults here.
         vm.setEnv("BROKER_TTL", vm.toString(uint256(30 days)));
         vm.setEnv("LEAF_TTL", vm.toString(uint256(60 days)));
-        vm.writeFile("./out/rehearsal-deployments.json", "{}");
+        vm.writeFile(DEPLOYMENTS, "{}");
 
         deployScript = new DeployIssuerHierarchy();
     }
 
-    function testFork_fullDay3Sequence() public {
-        // --- parent: commit, wait, register -------------------------------
+    function testFork_day3Rehearsal() public {
+        // ── build, in the order deploy-hierarchy.sh runs it ──────────────
         deployScript.commitParent();
-
-        // The only thing the fork cannot do for real.
-        vm.warp(block.timestamp + 61);
-
+        vm.warp(block.timestamp + 61); // the only thing the fork cannot do for real
         deployScript.registerParent();
-
-        // --- hierarchy and checker ----------------------------------------
+        deployScript.buildIssuers();
         deployScript.buildHierarchy();
-        deployScript.deployChecker();
+        deployScript.deployCheckers();
 
-        // --- the end-of-day criterion -------------------------------------
+        // The end-of-day criterion, including cross-issuer isolation.
         deployScript.verify();
+
+        _assertSetParentWiredAtEveryLevel();
+
+        uint256 built = vm.snapshotState();
+
+        _scenarioCrossIssuerIsolation();
+        vm.revertToState(built);
+
+        _scenarioBrokerLapseIsContained();
+        vm.revertToState(built);
+
+        _scenarioIssuerLapseCascades();
     }
 
-    /// @dev Beat 8, on live contracts rather than mocks: when the broker's name lapses, **both**
-    ///      tiers beneath it lose access at the same block — no transaction sent against either,
-    ///      and both their own names untouched. One expiry, two revocations that never happened.
-    function testFork_brokerLapseCascadesToBothTiers() public {
-        deployScript.commitParent();
-        vm.warp(block.timestamp + 61);
-        deployScript.registerParent();
+    // ── scenarios ────────────────────────────────────────────────────────
 
-        vm.setEnv("BROKER_TTL", "600"); // 10 minutes, as on camera
-        deployScript.buildHierarchy();
-        deployScript.deployChecker();
+    /// @dev Beat 9. Eligibility is issuer-scoped, and the proof is a refusal: `alice` is good for
+    ///      Acme's pool and must be nothing at all to Zenith's, even though both checkers walk to
+    ///      the same platform root. This passes only because the walk must also pass *through*
+    ///      `ISSUER_REGISTRY` — drop that guard and every checker admits the whole platform, with
+    ///      no happy path anywhere that would notice.
+    function _scenarioCrossIssuerIsolation() internal view {
+        address alice = _investor("alice"); // acme/prime
+        address bob = _investor("bob"); // zenith/prime
 
-        ENSAllowlistChecker checker = ENSAllowlistChecker(_addr("checker"));
-        address token = _addr("permissionedToken");
-        address brokerARegistry = _addr("registry_brokerA");
+        assertEq(_flag("acme", alice), _raw(PermissionFlags.SWAP_ALLOWED), "alice is eligible under acme");
+        assertEq(_flag("zenith", alice), _raw(PermissionFlags.NONE), "and must be refused by zenith");
+
+        assertEq(_flag("zenith", bob), _raw(PermissionFlags.SWAP_ALLOWED), "bob is eligible under zenith");
+        assertEq(_flag("acme", bob), _raw(PermissionFlags.NONE), "and must be refused by acme");
+    }
+
+    /// @dev Beats 11 and 13, which are one event seen from two sides. `acme/prime` lapses: both
+    ///      tiers beneath it lose access at the same block, with no transaction sent against
+    ///      either and both their own names untouched — and the *same broker* under Zenith keeps
+    ///      trading. Without that second half this is indistinguishable from a kill switch.
+    ///
+    ///      Driven by time rather than by re-deploying with a short TTL: `acme/prime` takes the
+    ///      30-day default and `zenith/prime` carries an explicit 90 days in the config, so one
+    ///      warp separates them. That is also exactly how the config is meant to be used on camera.
+    function _scenarioBrokerLapseIsContained() internal {
         address alice = _investor("alice");
         address mm = _investor("mm");
-        address bob = _investor("bob"); // under brokerB — must be unaffected
+        address bob = _investor("bob");
 
-        // Beat 7's precondition: the two tiers really differ.
+        // Precondition for beat 8: the two tiers really differ.
+        assertEq(_flag("acme", alice), _raw(PermissionFlags.SWAP_ALLOWED), "retail is swap-only");
         assertEq(
-            PermissionFlag.unwrap(checker.checkAllowlist(alice, token)),
-            PermissionFlag.unwrap(PermissionFlags.SWAP_ALLOWED),
-            "retail should be swap-only"
-        );
-        assertEq(
-            PermissionFlag.unwrap(checker.checkAllowlist(mm, token)),
-            PermissionFlag.unwrap(PermissionFlags.SWAP_ALLOWED | PermissionFlags.LIQUIDITY_ALLOWED),
-            "market maker should hold both bits"
+            _flag("acme", mm),
+            _raw(PermissionFlags.SWAP_ALLOWED | PermissionFlags.LIQUIDITY_ALLOWED),
+            "market maker holds both bits"
         );
 
-        vm.warp(block.timestamp + 601);
+        vm.warp(block.timestamp + 31 days);
+
+        assertEq(_flag("acme", alice), _raw(PermissionFlags.NONE), "acme/prime lapsed, retail cut off");
+        assertEq(_flag("acme", mm), _raw(PermissionFlags.NONE), "acme/prime lapsed, market maker cut off");
 
         assertEq(
-            PermissionFlag.unwrap(checker.checkAllowlist(alice, token)),
-            PermissionFlag.unwrap(PermissionFlags.NONE),
-            "brokerA lapsed, retail must be cut off"
-        );
-        assertEq(
-            PermissionFlag.unwrap(checker.checkAllowlist(mm, token)),
-            PermissionFlag.unwrap(PermissionFlags.NONE),
-            "brokerA lapsed, market maker must be cut off too"
-        );
-
-        // The cascade is scoped to the broker that lapsed. brokerB's investor is untouched —
-        // otherwise this would be a global kill switch, not an expiry cascade.
-        assertEq(
-            PermissionFlag.unwrap(checker.checkAllowlist(bob, token)),
-            PermissionFlag.unwrap(PermissionFlags.SWAP_ALLOWED),
-            "brokerB's investor must be unaffected"
+            _flag("zenith", bob),
+            _raw(PermissionFlags.SWAP_ALLOWED),
+            "the same broker under zenith must be untouched"
         );
 
         // Both cut-off investors' own names are still perfectly valid — only the broker expired.
+        address acmePrime = _addr("registry_acme_prime");
         string[2] memory labels = ["alice", "mm"];
         for (uint256 i = 0; i < labels.length; i++) {
-            IPermissionedRegistry.State memory leaf =
-                IPermissionedRegistry(brokerARegistry).getState(LibLabel.id(labels[i]));
+            IPermissionedRegistry.State memory leaf = IPermissionedRegistry(acmePrime).getState(LibLabel.id(labels[i]));
             assertEq(uint256(leaf.status), uint256(IPermissionedRegistry.Status.REGISTERED));
             assertGt(leaf.expiry, block.timestamp);
         }
     }
 
-    // NOTE: the "investors must be distinct addresses" guard in `buildHierarchy()` is deliberately
-    // NOT covered here. Exercising it means mutating MM_ADDRESS mid-test, and `vm.setEnv` is
-    // process-wide while forge runs tests in parallel — the override raced into every other test in
-    // this file and failed all of them. The guard still protects the real run; a test that
-    // corrupts its neighbours is worse than no test.
+    /// @dev The cascade one level up. An issuer lapsing takes every broker and every investor
+    ///      beneath it and leaves the other issuer entirely alone — which is why issuers carry a
+    ///      long ttl in the config. This is a much bigger event than the one we film.
+    function _scenarioIssuerLapseCascades() internal {
+        address alice = _investor("alice");
+        address mm = _investor("mm");
+        address bob = _investor("bob");
 
+        vm.prank(deployer);
+        IPermissionedRegistry(_addr("platformRegistry")).unregister(LibLabel.id("acme"));
 
-    /// @dev Guards the trap that `setSubregistry` does not wire the reverse pointer. If the deploy
-    ///      script ever stops calling `setParent`, the walk silently loses every ancestor check.
-    function testFork_setParentIsWiredBothLevels() public {
-        deployScript.commitParent();
-        vm.warp(block.timestamp + 61);
-        deployScript.registerParent();
-        deployScript.buildHierarchy();
+        assertEq(_flag("acme", alice), _raw(PermissionFlags.NONE), "issuer gone, retail cut off");
+        assertEq(_flag("acme", mm), _raw(PermissionFlags.NONE), "issuer gone, market maker cut off");
+        assertEq(_flag("zenith", bob), _raw(PermissionFlags.SWAP_ALLOWED), "the other issuer is unaffected");
+    }
 
-        (IRegistry issuerParent, string memory issuerLabel) = IRegistry(_addr("issuerRegistry")).getParent();
-        assertEq(address(issuerParent), 0x1D78834d97c1D7b1A38c1deDBD1a287cFEd3971e, "issuer parent must be .eth");
-        assertEq(issuerLabel, "canopy");
+    /// @dev Guards the trap that `setSubregistry` does not wire the reverse pointer. Checked at all
+    ///      three levels, because a registry wired downward but not upward fails only for its own
+    ///      subtree — easy to miss while the rest of the tree still works.
+    function _assertSetParentWiredAtEveryLevel() internal view {
+        (IRegistry platformParent, string memory platformLabel) = IRegistry(_addr("platformRegistry")).getParent();
+        assertEq(address(platformParent), ETH_REGISTRY, "platform parent is .eth");
+        assertEq(platformLabel, "canopy");
 
-        // Every broker in the config, not just the first — a second broker wired downward but not
-        // upward would fail only for its own investors, which is easy to miss.
-        string[2] memory brokers = ["brokerA", "brokerB"];
-        for (uint256 i = 0; i < brokers.length; i++) {
-            (IRegistry brokerParent, string memory brokerLabel) =
-                IRegistry(_addr(string.concat("registry_", brokers[i]))).getParent();
-            assertEq(address(brokerParent), _addr("issuerRegistry"), "broker parent must be the issuer registry");
-            assertEq(brokerLabel, brokers[i]);
+        string[2] memory issuers = ["acme", "zenith"];
+        for (uint256 s = 0; s < issuers.length; s++) {
+            (IRegistry issuerParent, string memory issuerLabel) =
+                IRegistry(_addr(string.concat("registry_", issuers[s]))).getParent();
+            assertEq(address(issuerParent), _addr("platformRegistry"), "issuer parent is the platform registry");
+            assertEq(issuerLabel, issuers[s]);
         }
+
+        // Every broker, and specifically both `prime`s — where a shared salt or a shared
+        // address-book key would show up as one registry doing double duty.
+        string[3] memory brokerKeys = ["registry_acme_prime", "registry_acme_delta", "registry_zenith_prime"];
+        string[3] memory brokerIssuers = ["registry_acme", "registry_acme", "registry_zenith"];
+        string[3] memory brokerLabels = ["prime", "delta", "prime"];
+
+        for (uint256 b = 0; b < brokerKeys.length; b++) {
+            (IRegistry brokerParent, string memory brokerLabel) = IRegistry(_addr(brokerKeys[b])).getParent();
+            assertEq(address(brokerParent), _addr(brokerIssuers[b]), "broker parent is its own issuer's registry");
+            assertEq(brokerLabel, brokerLabels[b]);
+        }
+
+        assertTrue(
+            _addr("registry_acme_prime") != _addr("registry_zenith_prime"),
+            "one broker label under two issuers must not collapse to one registry"
+        );
+    }
+
+    // NOTE: the "investors must be distinct addresses" guard is deliberately not covered here.
+    // Exercising it means mutating an address env var mid-run, and `vm.setEnv` is process-wide —
+    // the override would leak into every other assertion in this file.
+
+    // ── helpers ──────────────────────────────────────────────────────────
+
+    /// @dev What `issuer`'s own checker says about `who`, against `issuer`'s own pool token.
+    function _flag(string memory issuer, address who) internal view returns (bytes2) {
+        ENSAllowlistChecker checker = ENSAllowlistChecker(_addr(string.concat("checker_", issuer)));
+        return PermissionFlag.unwrap(
+            checker.checkAllowlist(who, _addr(string.concat("permissionedToken_", issuer)))
+        );
+    }
+
+    function _raw(PermissionFlag f) internal pure returns (bytes2) {
+        return PermissionFlag.unwrap(f);
     }
 
     function _addr(string memory key) internal view returns (address) {
-        string memory json = vm.readFile("./out/rehearsal-deployments.json");
-        return vm.parseJsonAddress(json, string.concat(".", key));
+        return vm.parseJsonAddress(vm.readFile(DEPLOYMENTS), string.concat(".", key));
     }
 }

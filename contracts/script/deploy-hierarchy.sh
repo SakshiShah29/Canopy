@@ -6,10 +6,11 @@
 #   ./script/deploy-hierarchy.sh --rehearse      # fork rehearsal, spends nothing
 #   ./script/deploy-hierarchy.sh --verify        # just re-run the checks
 #   ./script/deploy-hierarchy.sh --reset-broker  # re-arm the lapse between takes
-#                                                # (BROKER=brokerB to pick one)
+#                                                # (ISSUER=acme BROKER=prime to pick one)
 #
-# The hierarchy is described declaratively in script/hierarchy.json — add a broker or a bootstrap
-# investor there and re-run. Only what is missing gets created.
+# The hierarchy is described declaratively in script/hierarchy.json — four levels, platform ->
+# issuer -> broker -> investor. Add an issuer, a broker or a bootstrap investor there and re-run;
+# only what is missing gets created. A broker onboarded by two issuers appears twice, under both.
 #
 # Safe to re-run. Every phase in DeployIssuerHierarchy.s.sol inspects on-chain state before acting,
 # so an interrupted run resumes from where it stopped rather than duplicating work. If a phase
@@ -140,9 +141,12 @@ fi
 if [[ "$MODE" == "reset-broker" ]]; then
     CURRENT_PHASE="reset-broker"
     step "Re-arm the broker name"
-    warn "this unregisters and re-registers the broker — SETUP ONLY, never on camera"
+    warn "this unregisters and re-registers ONE issuer's broker — SETUP ONLY, never on camera"
     warn "unregister is the revocation transaction the pitch claims is unnecessary"
-    forge script "$SCRIPT" --sig "resetBroker(string)" "${BROKER:-}" --rpc-url "$SEPOLIA_RPC_URL" --broadcast --slow
+    # Both halves are needed: a broker label can appear under several issuers, and re-arming the
+    # wrong one silently resets the broker that is supposed to SURVIVE the lapse.
+    forge script "$SCRIPT" --sig "resetBroker(string,string)" "${ISSUER:-}" "${BROKER:-}" \
+        --rpc-url "$SEPOLIA_RPC_URL" --broadcast --slow
     echo
     ok "broker re-armed — let the countdown run out on its own for the take"
     exit 0
@@ -157,10 +161,10 @@ PARENT_FREE=$(cast call "$ETH_REGISTRAR" "isAvailable(string)(bool)" "$PARENT_LA
     --rpc-url "$SEPOLIA_RPC_URL" | tr -d '[:space:]')
 
 if [[ "$PARENT_FREE" == "false" ]]; then
-    step "1-3/5  ${PARENT_LABEL}.eth already registered — skipping commit, wait and register"
+    step "1-3/6  ${PARENT_LABEL}.eth already registered — skipping commit, wait and register"
     info "re-running only the parts that are cheap to rebuild"
 else
-    run_phase "commitParent()" "1/5  deploy issuer registry + commit to ${PARENT_LABEL}.eth"
+    run_phase "commitParent()" "1/6  deploy platform registry + commit to ${PARENT_LABEL}.eth"
 
     # --- the wait ----------------------------------------------------------
     # Read MIN_COMMITMENT_AGE from the chain rather than assuming 60s, and add a buffer: the
@@ -170,7 +174,7 @@ else
     MIN_AGE=$(cast call "$ETH_REGISTRAR" "MIN_COMMITMENT_AGE()(uint64)" --rpc-url "$SEPOLIA_RPC_URL" | tr -d '[:space:]')
     WAIT=$(( MIN_AGE + 15 ))
 
-    step "2/5  waiting ${WAIT}s for the commitment to mature (MIN_COMMITMENT_AGE=${MIN_AGE}s)"
+    step "2/6  waiting ${WAIT}s for the commitment to mature (MIN_COMMITMENT_AGE=${MIN_AGE}s)"
     for (( i = WAIT; i > 0; i-- )); do
         printf "\r    %ss remaining " "$i"
         sleep 1
@@ -178,10 +182,11 @@ else
     printf "\r%*s\r" 40 ""
     ok "commitment matured"
 
-    run_phase "registerParent()" "3/5  register ${PARENT_LABEL}.eth + wire setParent"
+    run_phase "registerParent()" "3/6  register ${PARENT_LABEL}.eth + wire setParent"
 fi
-run_phase "buildHierarchy()" "4/5  every broker in script/hierarchy.json, with setParent on each"
-run_phase "deployChecker()"  "5/5  deploy ENSAllowlistChecker + record every investor's path"
+run_phase "buildIssuers()"   "4/6  every issuer in script/hierarchy.json, with setParent on each"
+run_phase "buildHierarchy()" "5/6  every broker under every issuer, with setParent on each"
+run_phase "deployCheckers()" "6/6  one ENSAllowlistChecker per issuer + record every investor's path"
 
 # ---------------------------------------------------------------------------
 # Verify

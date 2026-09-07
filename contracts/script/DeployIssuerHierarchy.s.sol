@@ -76,6 +76,10 @@ interface IUserRegistryLike {
     function initialize(RoleGrant[] calldata grants) external;
 }
 
+interface IEnhancedAccessControlLike {
+    function grantRootRoles(uint256 roleBitmap, address account) external returns (bool);
+}
+
 interface IMockUSDCLike {
     function mint(address to, uint256 amount) external;
     function approve(address spender, uint256 amount) external returns (bool);
@@ -146,22 +150,43 @@ contract DeployIssuerHierarchy is Script {
         }
     }
 
-    function _brokerLabels() internal view returns (string[] memory labels) {
+    function _issuerLabels() internal view returns (string[] memory labels) {
         string memory json = _config();
-        uint256 n = _count(json, ".brokers[", "].label");
+        uint256 n = _count(json, ".issuers[", "].label");
 
         labels = new string[](n);
         for (uint256 i = 0; i < n; i++) {
-            labels[i] = vm.parseJsonString(json, string.concat(".brokers[", vm.toString(i), "].label"));
+            labels[i] = vm.parseJsonString(json, string.concat(".issuers[", vm.toString(i), "].label"));
         }
     }
 
-    /// @dev Per-broker expiry. `0` (or absent) falls back to `BROKER_TTL`, which the demo shortens
-    ///      to film the lapse. A broker that must survive that lapse needs an explicit long value,
-    ///      or a global short TTL expires every broker at once and the cascade stops looking scoped.
-    function _brokerExpiryOf(uint256 b) internal view returns (uint64) {
+    function _issuerAt(uint256 s) internal pure returns (string memory) {
+        return string.concat(".issuers[", vm.toString(s), "]");
+    }
+
+    function _brokerAt(uint256 s, uint256 b) internal pure returns (string memory) {
+        return string.concat(_issuerAt(s), ".brokers[", vm.toString(b), "]");
+    }
+
+    /// @dev The brokers under issuer `s`. A label may repeat across issuers — the same broker
+    ///      onboarded twice — which is why nothing downstream keys on the label alone.
+    function _brokerLabelsOf(uint256 s) internal view returns (string[] memory labels) {
         string memory json = _config();
-        string memory path = string.concat(".brokers[", vm.toString(b), "].ttl");
+        uint256 n = _count(json, string.concat(_issuerAt(s), ".brokers["), "].label");
+
+        labels = new string[](n);
+        for (uint256 b = 0; b < n; b++) {
+            labels[b] = vm.parseJsonString(json, string.concat(_brokerAt(s, b), ".label"));
+        }
+    }
+
+    /// @dev Expiry from a `ttl` at `at`. `0` or absent falls back to `BROKER_TTL`, which the demo
+    ///      shortens to film the lapse. Anything that must survive that lapse needs an explicit
+    ///      long value, or a global short TTL expires everything at once and the cascade stops
+    ///      looking scoped to one broker.
+    function _expiryAt(string memory at) internal view returns (uint64) {
+        string memory json = _config();
+        string memory path = string.concat(at, ".ttl");
 
         if (vm.keyExistsJson(json, path)) {
             uint256 ttl = vm.parseJsonUint(json, path);
@@ -170,10 +195,10 @@ contract DeployIssuerHierarchy is Script {
         return _brokerExpiry();
     }
 
-    /// @dev The bootstrap investors under broker `b`.
-    function _investorsOf(uint256 b) internal view returns (Investor[] memory list) {
+    /// @dev The bootstrap investors under issuer `s`, broker `b`.
+    function _investorsOf(uint256 s, uint256 b) internal view returns (Investor[] memory list) {
         string memory json = _config();
-        string memory base = string.concat(".brokers[", vm.toString(b), "]");
+        string memory base = _brokerAt(s, b);
 
         uint256 n = _count(json, string.concat(base, ".investors["), "].label");
         list = new Investor[](n);
@@ -208,20 +233,21 @@ contract DeployIssuerHierarchy is Script {
         return placeholder;
     }
 
-    /// @notice The two investors the tier split needs.
-    /// @dev Every bootstrap investor across every broker, flattened.
-    function _allInvestors() internal view returns (Investor[] memory list) {
-        string[] memory brokers = _brokerLabels();
+    /// @dev Every bootstrap investor under one issuer, flattened across its brokers. Scoped to an
+    ///      issuer because that is the unit a checker answers for — a flat list across the whole
+    ///      platform has no checker that could verify it.
+    function _investorsOfIssuer(uint256 s) internal view returns (Investor[] memory list) {
+        uint256 brokers = _brokerLabelsOf(s).length;
 
         uint256 n;
-        for (uint256 b = 0; b < brokers.length; b++) {
-            n += _investorsOf(b).length;
+        for (uint256 b = 0; b < brokers; b++) {
+            n += _investorsOf(s, b).length;
         }
 
         list = new Investor[](n);
         uint256 k;
-        for (uint256 b = 0; b < brokers.length; b++) {
-            Investor[] memory some = _investorsOf(b);
+        for (uint256 b = 0; b < brokers; b++) {
+            Investor[] memory some = _investorsOf(s, b);
             for (uint256 i = 0; i < some.length; i++) {
                 list[k++] = some[i];
             }
@@ -230,7 +256,7 @@ contract DeployIssuerHierarchy is Script {
 
     /// @dev Roles the deployer holds on each registry we own. Each role is paired with its `_ADMIN`
     ///      twin so the deployer can also delegate it later — notably granting `ROLE_REGISTRAR` to
-    ///      `SubnameRegistrar` on Day 4, whose address is not known yet.
+    ///      `MintAttestor` on Day 4, whose address is not known yet.
     uint256 internal constant OPERATOR_ROLES = RegistryRolesLib.ROLE_REGISTRAR
         | RegistryRolesLib.ROLE_REGISTRAR_ADMIN | RegistryRolesLib.ROLE_RENEW | RegistryRolesLib.ROLE_RENEW_ADMIN
         | RegistryRolesLib.ROLE_SET_SUBREGISTRY | RegistryRolesLib.ROLE_SET_SUBREGISTRY_ADMIN
@@ -253,7 +279,7 @@ contract DeployIssuerHierarchy is Script {
         address deployer = _deployer();
         vm.startBroadcast(_key());
 
-        address issuerRegistry = _ensureIssuerRegistry(deployer);
+        address platformRegistry = _ensurePlatformRegistry(deployer);
 
         // A consumed commitment is deleted on-chain, so `commitmentAt` reads zero again after a
         // successful registration. Without this check a re-run would send a pointless commit and
@@ -267,7 +293,7 @@ contract DeployIssuerHierarchy is Script {
         _ensureFunded(deployer);
 
         bytes32 commitment = IETHRegistrarLike(ETH_REGISTRAR).makeCommitment(
-            _parentLabel(), deployer, _secret(deployer), IRegistry(issuerRegistry), address(0), PARENT_DURATION, bytes32(0)
+            _parentLabel(), deployer, _secret(deployer), IRegistry(platformRegistry), address(0), PARENT_DURATION, bytes32(0)
         );
 
         if (IETHRegistrarLike(ETH_REGISTRAR).commitmentAt(commitment) != 0) {
@@ -284,8 +310,8 @@ contract DeployIssuerHierarchy is Script {
     /// @notice Register the parent name. Requires `commitParent()` at least 60s earlier.
     function registerParent() public {
         address deployer = _deployer();
-        address issuerRegistry = _load("issuerRegistry");
-        require(issuerRegistry != address(0), "run commitParent() first");
+        address platformRegistry = _load("platformRegistry");
+        require(platformRegistry != address(0), "run commitParent() first");
 
         vm.startBroadcast(_key());
 
@@ -303,7 +329,7 @@ contract DeployIssuerHierarchy is Script {
                 _parentLabel(),
                 deployer,
                 _secret(deployer),
-                IRegistry(issuerRegistry),
+                IRegistry(platformRegistry),
                 address(0),
                 PARENT_DURATION,
                 MOCK_USDC,
@@ -312,9 +338,9 @@ contract DeployIssuerHierarchy is Script {
             console2.log("registered parent, price paid", price);
         }
 
-        // The reverse pointer. `register` above set .eth -> issuerRegistry; this sets the other
+        // The reverse pointer. `register` above set .eth -> platformRegistry; this sets the other
         // direction, which is what the checker's upward walk needs. See _ancestorsAlive().
-        _ensureParent(issuerRegistry, ETH_REGISTRY, _parentLabel());
+        _ensureParent(platformRegistry, ETH_REGISTRY, _parentLabel());
 
         vm.stopBroadcast();
     }
@@ -326,36 +352,101 @@ contract DeployIssuerHierarchy is Script {
     ///      missing pieces are created. Brokers are issuer infrastructure — no CRE involved.
     ///
     ///      The investors here are **bootstrap only**. In the real flow they arrive via
-    ///      application -> CRE verdict -> `MintAttestor` -> `SubnameRegistrar`. Keep this list to
+    ///      application -> CRE verdict -> `MintAttestor`. Keep this list to
     ///      the few needed before CRE exists on Day 4; adding everyone here bypasses the product.
-    function buildHierarchy() public {
+    function buildIssuers() public {
         address deployer = _deployer();
-        address issuerRegistry = _load("issuerRegistry");
-        require(issuerRegistry != address(0), "run commitParent() first");
+        address platformRegistry = _load("platformRegistry");
+        require(platformRegistry != address(0), "run commitParent() first");
 
-        string[] memory brokers = _brokerLabels();
-        require(brokers.length > 0, "no brokers in script/hierarchy.json");
+        string[] memory issuers = _issuerLabels();
+        require(issuers.length > 0, "no issuers in script/hierarchy.json");
 
         vm.startBroadcast(_key());
 
-        for (uint256 b = 0; b < brokers.length; b++) {
-            string memory broker = brokers[b];
+        for (uint256 s = 0; s < issuers.length; s++) {
+            address issuerRegistry = _ensureIssuerRegistry(issuers[s]);
+            _ensureSubname(platformRegistry, issuers[s], deployer, issuerRegistry, 0, _expiryAt(_issuerAt(s)));
+            _ensureParent(issuerRegistry, platformRegistry, issuers[s]);
+        }
 
-            address brokerRegistry = _ensureBrokerRegistry(broker);
-            _ensureSubname(issuerRegistry, broker, deployer, brokerRegistry, 0, _brokerExpiryOf(b));
-            _ensureParent(brokerRegistry, issuerRegistry, broker);
+        vm.stopBroadcast();
+    }
 
-            Investor[] memory investors = _investorsOf(b);
-            for (uint256 i = 0; i < investors.length; i++) {
-                _ensureSubname(
-                    brokerRegistry,
-                    investors[i].label,
-                    investors[i].wallet,
-                    address(0),
-                    investors[i].roles,
-                    _leafExpiry()
-                );
+    function buildHierarchy() public {
+        address deployer = _deployer();
+        string[] memory issuers = _issuerLabels();
+        require(issuers.length > 0, "no issuers in script/hierarchy.json");
+
+        vm.startBroadcast(_key());
+
+        for (uint256 s = 0; s < issuers.length; s++) {
+            address issuerRegistry = _load(_issuerKey(issuers[s]));
+            require(issuerRegistry != address(0), "run buildIssuers() first");
+
+            string[] memory brokers = _brokerLabelsOf(s);
+
+            for (uint256 b = 0; b < brokers.length; b++) {
+                string memory broker = brokers[b];
+
+                address brokerRegistry = _ensureBrokerRegistry(issuers[s], broker);
+                _ensureSubname(issuerRegistry, broker, deployer, brokerRegistry, 0, _expiryAt(_brokerAt(s, b)));
+                _ensureParent(brokerRegistry, issuerRegistry, broker);
+
+                Investor[] memory investors = _investorsOf(s, b);
+                for (uint256 i = 0; i < investors.length; i++) {
+                    _ensureSubname(
+                        brokerRegistry,
+                        investors[i].label,
+                        investors[i].wallet,
+                        address(0),
+                        investors[i].roles,
+                        _leafExpiry()
+                    );
+                }
             }
+        }
+
+        vm.stopBroadcast();
+    }
+
+    /// @notice Hand minting rights to `MintAttestor`. Run once, after Day 4 deploys it.
+    ///
+    /// @dev Two grants, and missing either one breaks minting in a way that reads as a checker bug:
+    ///
+    ///      1. `ROLE_REGISTRAR` on **every broker registry**, because the attestor calls
+    ///         `IPermissionedRegistry.register` directly. There is no separate `SubnameRegistrar` —
+    ///         collapsing the two removes a contract without changing what is enforced, since the
+    ///         registrar never held any logic of its own.
+    ///      2. `setAttestor` on the checker, because `recordPath` is `onlyAttestor` and the checker
+    ///         was deployed pointing at the deployer EOA so Day 3 could record bootstrap leaves.
+    ///
+    ///      The deployer holds `ROLE_REGISTRAR_ADMIN` from each registry's initializer, which is
+    ///      what makes granting here possible at all — `grantRootRoles` needs the `_ADMIN` twin of
+    ///      the role being granted (risk #10).
+    function grantAttestor(address attestor) public {
+        require(attestor != address(0), "attestor address required");
+
+        string[] memory issuers = _issuerLabels();
+        require(issuers.length > 0, "no issuers in script/hierarchy.json");
+
+        vm.startBroadcast(_key());
+
+        for (uint256 s = 0; s < issuers.length; s++) {
+            string[] memory brokers = _brokerLabelsOf(s);
+
+            for (uint256 b = 0; b < brokers.length; b++) {
+                address brokerRegistry = _load(_registryKey(issuers[s], brokers[b]));
+                require(brokerRegistry != address(0), "run buildHierarchy() first");
+
+                IEnhancedAccessControlLike(brokerRegistry).grantRootRoles(RegistryRolesLib.ROLE_REGISTRAR, attestor);
+                console2.log(string.concat("ROLE_REGISTRAR granted on ", issuers[s], "/", brokers[b]), attestor);
+            }
+
+            address checker = _load(_checkerKey(issuers[s]));
+            require(checker != address(0), "run deployCheckers() first");
+            ENSAllowlistChecker(checker).setAttestor(attestor);
+            console2.log(string.concat("checker attestor set for ", issuers[s]), attestor);
         }
 
         vm.stopBroadcast();
@@ -364,33 +455,63 @@ contract DeployIssuerHierarchy is Script {
     /// @notice Deploy the checker and record the investor's leaf.
     /// @dev `recordPath` is `onlyAttestor` and `MintAttestor` does not exist until Day 4, so the
     ///      attestor is the deployer for now and is re-pointed with `setAttestor` tomorrow.
-    function deployChecker() public {
+    /// @notice One checker per issuer, each recording only its own issuer's bootstrap leaves.
+    ///
+    /// @dev `ROOT_ANCHOR` is the **platform** registry, not `.eth`. Anchoring at `.eth` would add a
+    ///      fourth hop purely to check that `canopy.eth` — our own name, which we renew — has not
+    ///      lapsed. Anchored here the walk is still two ancestor checks (the broker's name in the
+    ///      issuer's registry, the issuer's name in the platform registry), so the issuer's expiry
+    ///      still cascades and the gas number does not move.
+    ///
+    ///      `ISSUER_REGISTRY` is what keeps the issuers apart. Every checker shares a root, so
+    ///      reaching it proves only that a leaf is somewhere under Canopy; passing *through* the
+    ///      issuer is what proves it belongs to this pool.
+    function deployCheckers() public {
         address deployer = _deployer();
-        string[] memory brokers = _brokerLabels();
+        address platformRegistry = _load("platformRegistry");
+        require(platformRegistry != address(0), "run commitParent() first");
+
+        string[] memory issuers = _issuerLabels();
 
         vm.startBroadcast(_key());
 
-        address token = _permissionedToken();
-        ENSAllowlistChecker checker = new ENSAllowlistChecker(IRegistry(ETH_REGISTRY), token, deployer);
-        checker.setAttestor(deployer);
+        for (uint256 s = 0; s < issuers.length; s++) {
+            address issuerRegistry = _load(_issuerKey(issuers[s]));
+            require(issuerRegistry != address(0), "run buildIssuers() first");
 
-        for (uint256 b = 0; b < brokers.length; b++) {
-            address brokerRegistry = _load(_registryKey(brokers[b]));
-            require(brokerRegistry != address(0), "run buildHierarchy() first");
+            address token = _permissionedTokenOf(issuers[s]);
+            ENSAllowlistChecker checker = new ENSAllowlistChecker(
+                IRegistry(platformRegistry), IRegistry(issuerRegistry), token, deployer
+            );
+            checker.setAttestor(deployer);
 
-            Investor[] memory investors = _investorsOf(b);
-            for (uint256 i = 0; i < investors.length; i++) {
-                checker.recordPath(
-                    investors[i].wallet, IPermissionedRegistry(brokerRegistry), LibLabel.id(investors[i].label)
-                );
+            string[] memory brokers = _brokerLabelsOf(s);
+            for (uint256 b = 0; b < brokers.length; b++) {
+                address brokerRegistry = _load(_registryKey(issuers[s], brokers[b]));
+                require(brokerRegistry != address(0), "run buildHierarchy() first");
+
+                Investor[] memory investors = _investorsOf(s, b);
+                for (uint256 i = 0; i < investors.length; i++) {
+                    checker.recordPath(
+                        investors[i].wallet, IPermissionedRegistry(brokerRegistry), LibLabel.id(investors[i].label)
+                    );
+                }
             }
+
+            _save(_checkerKey(issuers[s]), address(checker));
+            _save(_tokenKey(issuers[s]), token);
+            console2.log(string.concat("checker for ", issuers[s]), address(checker));
         }
 
-        _save("checker", address(checker));
-        _save("permissionedToken", token);
-        console2.log("checker", address(checker));
-
         vm.stopBroadcast();
+    }
+
+    function _checkerKey(string memory issuerLabel) internal pure returns (string memory) {
+        return string.concat("checker_", issuerLabel);
+    }
+
+    function _tokenKey(string memory issuerLabel) internal pure returns (string memory) {
+        return string.concat("permissionedToken_", issuerLabel);
     }
 
     /// @notice Re-arm the broker name so the lapse can be rehearsed again immediately.
@@ -407,12 +528,21 @@ contract DeployIssuerHierarchy is Script {
     ///      registry, and we grant no roles on the broker's own resource, so nothing is orphaned by
     ///      the version bump.
     ///
-    /// @param label Which broker to re-arm. Defaults to the first in the config when empty.
-    function resetBroker(string memory label) public {
-        address issuerRegistry = _load("issuerRegistry");
-        if (bytes(label).length == 0) label = _brokerLabels()[0];
+    /// @param issuer Which issuer's book to re-arm. Defaults to the first in the config when empty.
+    /// @param label  Which broker under that issuer. Defaults to the first when empty.
+    ///
+    /// @dev Both are needed now that a broker label can appear under several issuers: re-arming
+    ///      `prime` without saying whose `prime` would be ambiguous, and getting it wrong would
+    ///      re-arm the broker that is supposed to survive the lapse — quietly destroying the
+    ///      containment beat rather than failing.
+    function resetBroker(string memory issuer, string memory label) public {
+        if (bytes(issuer).length == 0) issuer = _issuerLabels()[0];
 
-        address brokerRegistry = _load(_registryKey(label));
+        uint256 s = _issuerIndex(issuer);
+        if (bytes(label).length == 0) label = _brokerLabelsOf(s)[0];
+
+        address issuerRegistry = _load(_issuerKey(issuer));
+        address brokerRegistry = _load(_registryKey(issuer, label));
         require(issuerRegistry != address(0) && brokerRegistry != address(0), "run the full deploy first");
 
         vm.startBroadcast(_key());
@@ -422,7 +552,7 @@ contract DeployIssuerHierarchy is Script {
 
         if (state.status == IPermissionedRegistry.Status.REGISTERED) {
             IPermissionedRegistry(issuerRegistry).unregister(LibLabel.id(label));
-            console2.log("unregistered (setup only, not a demo step)", label);
+            console2.log("unregistered (setup only, not a demo step)", string.concat(issuer, "/", label));
         }
 
         uint64 expiry = _brokerExpiry();
@@ -435,82 +565,153 @@ contract DeployIssuerHierarchy is Script {
         vm.stopBroadcast();
     }
 
-    /// @notice The end-of-day criterion: the checker walking the live hierarchy.
-    function verify() public view {
-        ENSAllowlistChecker checker = ENSAllowlistChecker(_load("checker"));
-        address token = _load("permissionedToken");
-
-        Investor[] memory investors = _allInvestors();
-        bool sawLiquidityTier;
-
-        for (uint256 i = 0; i < investors.length; i++) {
-            PermissionFlag actual = checker.checkAllowlist(investors[i].wallet, token);
-
-            PermissionFlag expected = PermissionFlags.NONE;
-            if (investors[i].roles & CanopyRoles.ROLE_ELIGIBLE_SWAP != 0) {
-                expected = expected | PermissionFlags.SWAP_ALLOWED;
-            }
-            if (investors[i].roles & CanopyRoles.ROLE_ELIGIBLE_LIQUIDITY != 0) {
-                expected = expected | PermissionFlags.LIQUIDITY_ALLOWED;
-                sawLiquidityTier = true;
-            }
-
-            console2.log(investors[i].label, uint16(PermissionFlag.unwrap(actual)));
-            require(actual == expected, "investor flag does not match configured roles");
-
-            // Evaluated the way PermissionsAdapter.isAllowed evaluates it: containment, not
-            // equality. A swap-only investor must fail the liquidity gate — beat 7 rests on this.
-            if (investors[i].roles & CanopyRoles.ROLE_ELIGIBLE_LIQUIDITY == 0) {
-                require(
-                    !((actual & PermissionFlags.LIQUIDITY_ALLOWED) == PermissionFlags.LIQUIDITY_ALLOWED),
-                    "swap-only investor must NOT satisfy the liquidity gate"
-                );
-            }
+    function _issuerIndex(string memory issuer) internal view returns (uint256) {
+        string[] memory issuers = _issuerLabels();
+        for (uint256 s = 0; s < issuers.length; s++) {
+            if (keccak256(bytes(issuers[s])) == keccak256(bytes(issuer))) return s;
         }
+        revert("no such issuer in script/hierarchy.json");
+    }
 
-        PermissionFlag stranger = checker.checkAllowlist(address(0xdead), token);
-        console2.log("stranger", uint16(PermissionFlag.unwrap(stranger)));
-        require(stranger == PermissionFlags.NONE, "stranger should be NONE");
+    /// @notice The end-of-day criterion: every issuer's checker walking the live hierarchy, and
+    ///         refusing everyone else's investors.
+    function verify() public view {
+        string[] memory issuers = _issuerLabels();
+        require(issuers.length > 0, "no issuers in script/hierarchy.json");
+
+        bool sawLiquidityTier;
+        uint256 totalInvestors;
+
+        for (uint256 s = 0; s < issuers.length; s++) {
+            ENSAllowlistChecker checker = ENSAllowlistChecker(_load(_checkerKey(issuers[s])));
+            address token = _load(_tokenKey(issuers[s]));
+            require(address(checker) != address(0), "run deployCheckers() first");
+
+            console2.log(string.concat("-- ", issuers[s]));
+
+            Investor[] memory investors = _investorsOfIssuer(s);
+            totalInvestors += investors.length;
+
+            for (uint256 i = 0; i < investors.length; i++) {
+                PermissionFlag actual = checker.checkAllowlist(investors[i].wallet, token);
+
+                PermissionFlag expected = PermissionFlags.NONE;
+                if (investors[i].roles & CanopyRoles.ROLE_ELIGIBLE_SWAP != 0) {
+                    expected = expected | PermissionFlags.SWAP_ALLOWED;
+                }
+                if (investors[i].roles & CanopyRoles.ROLE_ELIGIBLE_LIQUIDITY != 0) {
+                    expected = expected | PermissionFlags.LIQUIDITY_ALLOWED;
+                    sawLiquidityTier = true;
+                }
+
+                console2.log(investors[i].label, uint16(PermissionFlag.unwrap(actual)));
+                require(actual == expected, "investor flag does not match configured roles");
+
+                // Evaluated the way PermissionsAdapter.isAllowed evaluates it: containment, not
+                // equality. A swap-only investor must fail the liquidity gate — beat 8 rests on it.
+                if (investors[i].roles & CanopyRoles.ROLE_ELIGIBLE_LIQUIDITY == 0) {
+                    require(
+                        !((actual & PermissionFlags.LIQUIDITY_ALLOWED) == PermissionFlags.LIQUIDITY_ALLOWED),
+                        "swap-only investor must NOT satisfy the liquidity gate"
+                    );
+                }
+            }
+
+            PermissionFlag stranger = checker.checkAllowlist(address(0xdead), token);
+            console2.log("stranger", uint16(PermissionFlag.unwrap(stranger)));
+            require(stranger == PermissionFlags.NONE, "stranger should be NONE");
+
+            // Beat 9, and the assertion the whole multi-issuer model turns on: every investor
+            // belonging to a *different* issuer must be refused here. Both checkers reach the same
+            // platform root, so this passes only because the walk also has to pass through
+            // ISSUER_REGISTRY. Without that guard each checker admits the whole platform, and no
+            // happy-path check would notice.
+            for (uint256 o = 0; o < issuers.length; o++) {
+                if (o == s) continue;
+
+                Investor[] memory foreign = _investorsOfIssuer(o);
+                for (uint256 i = 0; i < foreign.length; i++) {
+                    require(
+                        checker.checkAllowlist(foreign[i].wallet, token) == PermissionFlags.NONE,
+                        "another issuer's investor must be refused by this checker"
+                    );
+                }
+            }
+            console2.log("isolated from every other issuer's investors: ok");
+        }
 
         // Without a market maker there is no tier split to demonstrate.
         require(sawLiquidityTier, "no investor holds the liquidity tier");
-        require(investors.length >= 2, "need at least two investors for the tier split");
+        require(totalInvestors >= 2, "need at least two investors for the tier split");
+        require(issuers.length >= 2, "need at least two issuers to demonstrate isolation");
 
-        console2.log("OK: tier split holds on live state");
+        console2.log("OK: tier split and cross-issuer isolation hold on live state");
     }
 
     // ---------------------------------------------------------------------
     // Steps, each idempotent
     // ---------------------------------------------------------------------
 
-    function _ensureIssuerRegistry(address deployer) internal returns (address registry) {
-        registry = _load("issuerRegistry");
+    function _ensurePlatformRegistry(address deployer) internal returns (address registry) {
+        registry = _load("platformRegistry");
         if (registry != address(0) && registry.code.length > 0) return registry;
 
-        registry = _deployRegistry(deployer, uint256(keccak256("canopy.issuer.v1")));
-        _save("issuerRegistry", registry);
-        console2.log("issuerRegistry", registry);
+        registry = _deployRegistry(deployer, uint256(keccak256("canopy.platform.v1")));
+        _save("platformRegistry", registry);
+        console2.log("platformRegistry", registry);
     }
 
-    /// @dev One registry per broker, keyed and salted by label so adding a broker never disturbs
-    ///      an existing one.
-    function _registryKey(string memory brokerLabel) internal pure returns (string memory) {
-        return string.concat("registry_", brokerLabel);
+    /// @dev One registry per issuer, under the platform root.
+    function _issuerKey(string memory issuerLabel) internal pure returns (string memory) {
+        return string.concat("registry_", issuerLabel);
     }
 
-    function _ensureBrokerRegistry(string memory brokerLabel) internal returns (address registry) {
-        registry = _load(_registryKey(brokerLabel));
+    function _ensureIssuerRegistry(string memory issuerLabel) internal returns (address registry) {
+        registry = _load(_issuerKey(issuerLabel));
         if (registry != address(0) && registry.code.length > 0) return registry;
 
         registry = _deployRegistry(
-            _deployer(), uint256(keccak256(abi.encodePacked("canopy.broker.v1.", brokerLabel)))
+            _deployer(), uint256(keccak256(abi.encodePacked("canopy.issuer.v1.", issuerLabel)))
         );
-        _save(_registryKey(brokerLabel), registry);
-        console2.log("registry for broker", brokerLabel, registry);
+        _save(_issuerKey(issuerLabel), registry);
+        console2.log("registry for issuer", issuerLabel, registry);
+    }
+
+    /// @dev One registry per (issuer, broker). **Both halves are required**, and leaving the issuer
+    ///      out is not a cosmetic bug:
+    ///
+    ///      - The key would collide. `prime` under Acme and `prime` under Zenith would write the
+    ///        same `registry_prime` entry, and the second would overwrite the first.
+    ///      - Worse, the *salt* would collide. `VerifiableFactory` proxy addresses are deterministic
+    ///        in `(msg.sender, salt)`, so the same deployer and the same label resolve to the same
+    ///        proxy — and the idempotency check below ("code at the predicted address, skip") would
+    ///        then hand Zenith's Prime the registry belonging to Acme's Prime. Acme's expiry would
+    ///        silently cut off Zenith's investors, which is precisely the containment the model
+    ///        exists to provide.
+    function _registryKey(string memory issuerLabel, string memory brokerLabel)
+        internal
+        pure
+        returns (string memory)
+    {
+        return string.concat("registry_", issuerLabel, "_", brokerLabel);
+    }
+
+    function _ensureBrokerRegistry(string memory issuerLabel, string memory brokerLabel)
+        internal
+        returns (address registry)
+    {
+        registry = _load(_registryKey(issuerLabel, brokerLabel));
+        if (registry != address(0) && registry.code.length > 0) return registry;
+
+        registry = _deployRegistry(
+            _deployer(), uint256(keccak256(abi.encodePacked("canopy.broker.v1.", issuerLabel, ".", brokerLabel)))
+        );
+        _save(_registryKey(issuerLabel, brokerLabel), registry);
+        console2.log(string.concat("registry for ", issuerLabel, "/", brokerLabel), registry);
     }
 
     /// @dev A `UserRegistry` proxy. The initializer takes an array of grants; we grant the deployer
-    ///      the operator roles plus their `_ADMIN` twins so `SubnameRegistrar` can be added later
+    ///      the operator roles plus their `_ADMIN` twins so `MintAttestor` can be added later
     ///      with `grantRootRoles`.
     function _deployRegistry(address deployer, uint256 salt) internal returns (address) {
         RoleGrant[] memory grants = new RoleGrant[](1);
@@ -588,31 +789,63 @@ contract DeployIssuerHierarchy is Script {
     /// @dev `PERMISSIONED_TOKEN` is immutable on the checker, so this must be Builder B's real
     ///      permissioned test token before Day 4. Until it exists, a placeholder still exercises
     ///      the whole walk provided `verify()` passes the same address.
-    function _permissionedToken() internal view returns (address) {
-        address token = vm.envOr("PERMISSIONED_TOKEN", address(0));
+    /// @dev Each issuer's pool has its own permissioned token, so each has its own env var:
+    ///      `PERMISSIONED_TOKEN_ACME`, `PERMISSIONED_TOKEN_ZENITH`. The placeholder is derived from
+    ///      the issuer label rather than shared, because two checkers bound to the *same* token
+    ///      would answer for each other's pool and quietly undo the isolation this all exists for.
+    ///
+    ///      `PERMISSIONED_TOKEN` (unsuffixed) still works as a fallback for the first issuer while
+    ///      Builder B has only one pool deployed.
+    function _permissionedTokenOf(string memory issuerLabel) internal view returns (address) {
+        address token = vm.envOr(string.concat("PERMISSIONED_TOKEN_", _upper(issuerLabel)), address(0));
+        if (token == address(0) && _issuerIndex(issuerLabel) == 0) {
+            token = vm.envOr("PERMISSIONED_TOKEN", address(0));
+        }
+
         if (token == address(0)) {
-            token = address(uint160(uint256(keccak256("canopy.placeholder.token"))));
-            console2.log("WARNING: no PERMISSIONED_TOKEN set, using placeholder", token);
-            console2.log("         redeploy the checker once Builder B's token exists");
+            token = address(uint160(uint256(keccak256(abi.encodePacked("canopy.placeholder.token.", issuerLabel)))));
+            console2.log(
+                string.concat("WARNING: no PERMISSIONED_TOKEN_", _upper(issuerLabel), " set, using placeholder"), token
+            );
+            console2.log("         PERMISSIONED_TOKEN is immutable: redeploy this checker once the real token exists");
         }
         return token;
+    }
+
+    function _upper(string memory s) internal pure returns (string memory) {
+        bytes memory b = bytes(s);
+        bytes memory out = new bytes(b.length);
+        for (uint256 i = 0; i < b.length; i++) {
+            out[i] = (b[i] >= 0x61 && b[i] <= 0x7A) ? bytes1(uint8(b[i]) - 32) : b[i];
+        }
+        return string(out);
     }
 
     // ---------------------------------------------------------------------
     // deployments.json
     // ---------------------------------------------------------------------
 
+    /// @dev A surgical write: `writeJson(value, path, key)` replaces or creates exactly one key and
+    ///      leaves the rest of the file byte-for-byte alone.
+    ///
+    ///      This used to rebuild the whole object by iterating top-level keys and re-serializing
+    ///      each as an address, which only worked while `deployments.json` was a flat map of
+    ///      addresses. It is not: Builder B writes nested objects (`canopy`, `ens`, `uniswap`,
+    ///      `pool`) alongside a numeric `chainId` and a string `network`. Rebuilding would have
+    ///      reverted on the first nested value here and silently dropped every one of them in
+    ///      `DeployCREContracts`, taking the pool and adapter addresses with it. The fork rehearsal
+    ///      never caught it because it writes to a scratch file that starts empty.
     function _save(string memory key, address value) internal {
-        string memory json = _readDeployments();
-        // Rebuild the object so existing keys survive.
-        string[] memory keys = vm.parseJsonKeys(json, "$");
-        string memory out;
-        for (uint256 i = 0; i < keys.length; i++) {
-            if (keccak256(bytes(keys[i])) == keccak256(bytes(key))) continue;
-            out = vm.serializeAddress("deployments", keys[i], vm.parseJsonAddress(json, string.concat(".", keys[i])));
+        string memory path = _deployments();
+
+        // `writeJson` updates a file in place, so there has to be one.
+        try vm.readFile(path) returns (string memory contents) {
+            if (bytes(contents).length == 0) vm.writeFile(path, "{}");
+        } catch {
+            vm.writeFile(path, "{}");
         }
-        out = vm.serializeAddress("deployments", key, value);
-        vm.writeJson(out, _deployments());
+
+        vm.writeJson(string.concat('"', vm.toString(value), '"'), path, string.concat(".", key));
     }
 
     function _load(string memory key) internal view returns (address) {
