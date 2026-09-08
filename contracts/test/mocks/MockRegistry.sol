@@ -28,6 +28,7 @@ contract MockRegistry {
 
     mapping(uint256 labelhash => Entry) internal _entries;
     mapping(uint256 resource => mapping(address account => uint256 roleBitmap)) internal _roles;
+    mapping(uint256 labelhash => IRegistry) internal _subregistries;
 
     IRegistry internal _parent;
     string internal _childLabel;
@@ -67,6 +68,17 @@ contract MockRegistry {
     function setParent(IRegistry parent, string memory label) external {
         _parent = parent;
         _childLabel = label;
+    }
+
+    /// @notice Wire the downward delegation, as ENSv2's `setSubregistry` does.
+    ///
+    /// @dev Deliberately a separate call from `setParent`, exactly as upstream. The two are
+    ///      written by different parties — `setParent` by whoever holds roles on the *child*,
+    ///      `setSubregistry` by the parent's registrar — and the checker's walk now requires them
+    ///      to agree. Wiring both from one helper here would make it impossible to reproduce the
+    ///      disagreement, which is the failure the walk is guarding against.
+    function setSubregistry(string memory label, IRegistry registry) external {
+        _subregistries[LibLabel.id(label)] = registry;
     }
 
     /// @notice Clear the upward pointer, reproducing a registry wired downward but never upward.
@@ -114,6 +126,10 @@ contract MockRegistry {
 
     function getParent() external view returns (IRegistry parent, string memory label) {
         return (_parent, _childLabel);
+    }
+
+    function getSubregistry(string calldata label) external view returns (IRegistry) {
+        return _subregistries[LibLabel.id(label)];
     }
 }
 

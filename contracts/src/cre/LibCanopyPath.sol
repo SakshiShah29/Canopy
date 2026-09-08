@@ -60,6 +60,12 @@ library LibCanopyPath {
         while (n < MAX_DEPTH && address(current) != address(platform)) {
             (IRegistry parent, string memory label) = current.getParent();
             if (address(parent) == address(0)) revert NotUnderPlatform(address(start));
+            // The parent must agree. Without this an impostor registry claims `(acme, "prime")`,
+            // is handed Acme's identity and the `acme/prime` rulebook key, and is screened under a
+            // policy that has nothing to do with it. See `ENSAllowlistChecker._ancestorsAlive`.
+            if (address(parent.getSubregistry(label)) != address(current)) {
+                revert NotUnderPlatform(address(start));
+            }
 
             labels[n++] = label;
             // The last registry seen before we reach the platform is the issuer.
@@ -88,8 +94,13 @@ library LibCanopyPath {
         for (uint256 hops = 0; hops < MAX_DEPTH; hops++) {
             if (address(current) == address(platform)) return issuerRegistry;
 
-            (IRegistry parent,) = current.getParent();
+            (IRegistry parent, string memory label) = current.getParent();
             if (address(parent) == address(0)) revert NotUnderPlatform(address(start));
+            // Same confirmation as `resolve`. Kept in step deliberately: the two must agree, or
+            // an application and the mint that follows it would disagree about the hierarchy.
+            if (address(parent.getSubregistry(label)) != address(current)) {
+                revert NotUnderPlatform(address(start));
+            }
 
             issuerRegistry = address(current);
             current = parent;

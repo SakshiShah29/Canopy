@@ -64,6 +64,12 @@ contract CREBoundaryTest is Test {
     bytes32 internal constant WORKFLOW_ID = keccak256("canopy-eligibility-staging");
     uint64 internal constant EXPIRY = 2_000_000_000;
 
+    /// @dev Issuers and brokers outlive the investors beneath them, as they do in the config.
+    ///      Sharing one expiry with the leaves meant that warping past a *leaf* also expired the
+    ///      whole tree above it, so a test about re-applying for a lapsed name was really testing
+    ///      a collapsed hierarchy.
+    uint64 internal constant HIERARCHY_EXPIRY = 4_000_000_000;
+
     /// @dev `ROLE_REGISTRAR_ADMIN` is not decoration: `grantRootRoles` requires the `_ADMIN` twin
     ///      of the role being granted, so without it the fixture cannot hand the attestor minting
     ///      rights — the same call `DeployIssuerHierarchy.grantAttestor` makes on Sepolia, and the
@@ -112,7 +118,7 @@ contract CREBoundaryTest is Test {
     /// @dev Both directions. `setSubregistry` alone leaves the child reporting no parent at all,
     ///      which is what the upward walk would stop on.
     function _link(PermissionedRegistry parent, PermissionedRegistry child, string memory label) internal {
-        parent.register(label, OWNER, IRegistry(address(child)), address(0), 0, EXPIRY);
+        parent.register(label, OWNER, IRegistry(address(child)), address(0), 0, HIERARCHY_EXPIRY);
         child.setParent(IRegistry(address(parent)), label);
     }
 
@@ -183,6 +189,39 @@ contract CREBoundaryTest is Test {
         Vm.Log[] memory logs = vm.getRecordedLogs();
         // topics[2] is the indexed wallet.
         assertEq(address(uint160(uint256(logs[logs.length - 1].topics[2]))), ALICE);
+    }
+
+    /// @dev The delegated variant must name the *subject*, not the caller.
+    ///
+    ///      This has now regressed twice through merges, both times silently: the shared `_submit`
+    ///      read `msg.sender` while taking a `wallet` argument it ignored, so every delegated
+    ///      application was filed for whoever sent the transaction. It compiles, it emits a
+    ///      perfectly well-formed event, and the only symptom is that CRE screens the wrong
+    ///      address — which on demo day looks like the engine getting a verdict wrong.
+    ///
+    ///      Nothing guarded it, which is why it came back. This is that guard.
+    function test_delegatedApplicationNamesTheSubjectNotTheCaller() public {
+        vm.recordLogs();
+        vm.prank(BOB);
+        app.submitApplicationFor(ALICE, address(acmePrime), "alice", 0);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(
+            address(uint160(uint256(logs[logs.length - 1].topics[2]))),
+            ALICE,
+            "the application belongs to its subject, not its sender"
+        );
+    }
+
+    /// @dev And the nonce it consumes is the subject's, so two applications filed on behalf of the
+    ///      same wallet get distinct ids even when a single operator sends both.
+    function test_delegatedApplicationsForOneWalletGetDistinctIds() public {
+        vm.startPrank(BOB);
+        bytes32 first = app.submitApplicationFor(ALICE, address(acmePrime), "alice", 0);
+        bytes32 second = app.submitApplicationFor(ALICE, address(acmePrime), "alice", 0);
+        vm.stopPrank();
+
+        assertTrue(first != second, "per-subject nonce must advance");
     }
 
     /// @dev Without this the application runs through the enclave and the DON, and only fails when

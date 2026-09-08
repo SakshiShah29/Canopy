@@ -126,7 +126,7 @@ contract ENSAllowlistChecker is BaseAllowlistChecker, Ownable {
     /// @dev Walks from `start` up to `ROOT_ANCHOR`, requiring every name on the way to be alive
     ///      **and** requiring the path to pass through `ISSUER_REGISTRY`.
     ///
-    ///      Two independent conditions, both fail-closed:
+    ///      Three independent conditions, all fail-closed:
     ///
     ///      1. **The walk must arrive at `ROOT_ANCHOR`.** Terminating anywhere else — a null
     ///         parent, or more than `MAX_HOPS` — denies. ENSv2's `setParent` is a separate call
@@ -139,7 +139,15 @@ contract ENSAllowlistChecker is BaseAllowlistChecker, Ownable {
     ///         is somewhere under the platform, and every issuer shares that root. Without this,
     ///         a name under one issuer satisfies every other issuer's checker.
     ///
-    ///      Neither is visible on a happy path, and both fail by granting rather than denying,
+    ///      3. **Every link must be confirmed downward.** A link is two facts: the child's
+    ///         `getParent()` and the parent's `getSubregistry()`. Only the second is authoritative,
+    ///         because `setParent` is permissioned by the *child's* roles — anyone who deploys a
+    ///         registry holds them on it and can claim any parent they like. Checking liveness of
+    ///         the claimed label alone lets an impostor registry assert `(acmeRegistry, "prime")`
+    ///         and walk exactly like the real one, and lets a broker whose lapsed name was
+    ///         re-registered to a *different* registry keep its entire book.
+    ///
+    ///      None is visible on a happy path, and all three fail by granting rather than denying,
     ///      which is why each has its own test.
     function _ancestorsAlive(IRegistry start) private view returns (bool) {
         IRegistry current = start;
@@ -152,6 +160,9 @@ contract ENSAllowlistChecker is BaseAllowlistChecker, Ownable {
 
             (IRegistry parent, string memory label) = current.getParent();
             if (address(parent) == address(0)) return false;
+
+            // The child's claim, confirmed by the parent. See condition 3 above.
+            if (address(parent.getSubregistry(label)) != address(current)) return false;
 
             IPermissionedRegistry.State memory state =
                 IPermissionedRegistry(address(parent)).getState(LibLabel.id(label));
