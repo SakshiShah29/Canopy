@@ -88,18 +88,6 @@ contract MintAttestor is IReceiver {
         _;
     }
 
-    // ── ERC165 ────────────────────────────────────────────────────
-    function supportsInterface(bytes4 interfaceId) public pure override returns (bool) {
-        return interfaceId == type(IReceiver).interfaceId
-            || interfaceId == type(IERC165).interfaceId;
-    }
-
-    // ── ERC165 ────────────────────────────────────────────────────
-    function supportsInterface(bytes4 interfaceId) public pure override returns (bool) {
-        return interfaceId == type(IReceiver).interfaceId
-            || interfaceId == type(IERC165).interfaceId;
-    }
-
     // ── Admin ────────────────────────────────────────────────────
 
     /// @notice Set the workflow permitted to mint. Until this is called, every report reverts.
