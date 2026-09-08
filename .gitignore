@@ -11,6 +11,9 @@ contracts/.gas-snapshot
 contracts/lcov.info
 contracts/coverage/
 
+# --- cre (cre/) ---
+.cre_build_tmp.js
+
 # --- node ---
 node_modules/
 .pnpm-store/
