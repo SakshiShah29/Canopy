@@ -104,9 +104,12 @@ contract ApplicationContract {
         address issuer,
         address broker,
         string calldata brokerPath,
+        string calldata label,
         uint8 requestedTier
     ) external {
         require(requestedTier <= 1, "invalid tier");
+        uint256 len = bytes(label).length;
+        require(len > 0 && len <= 32, "invalid label");
 
         uint256 nonce = nonces[wallet]++;
         bytes32 applicationId = keccak256(
@@ -119,6 +122,7 @@ contract ApplicationContract {
             issuer,
             broker,
             brokerPath,
+            label,
             requestedTier
         );
     }

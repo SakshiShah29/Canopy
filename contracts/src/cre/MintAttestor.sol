@@ -7,8 +7,6 @@ import {IRegistry} from "@ens/registry/interfaces/IRegistry.sol";
 import {IPermissionedRegistry} from "@ens/registry/interfaces/IPermissionedRegistry.sol";
 import {LibLabel} from "@ens/utils/LibLabel.sol";
 
-import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
-
 import {ENSAllowlistChecker} from "../checker/ENSAllowlistChecker.sol";
 import {IReceiver} from "./IReceiver.sol";
 import {LibCanopyPath} from "./LibCanopyPath.sol";
@@ -88,18 +86,6 @@ contract MintAttestor is IReceiver {
         _;
     }
 
-    // ── ERC165 ────────────────────────────────────────────────────
-    function supportsInterface(bytes4 interfaceId) public pure override returns (bool) {
-        return interfaceId == type(IReceiver).interfaceId
-            || interfaceId == type(IERC165).interfaceId;
-    }
-
-    // ── ERC165 ────────────────────────────────────────────────────
-    function supportsInterface(bytes4 interfaceId) public pure override returns (bool) {
-        return interfaceId == type(IReceiver).interfaceId
-            || interfaceId == type(IERC165).interfaceId;
-    }
-
     // ── Admin ────────────────────────────────────────────────────
 
     /// @notice Set the workflow permitted to mint. Until this is called, every report reverts.
@@ -128,7 +114,7 @@ contract MintAttestor is IReceiver {
     /// @dev `KeystoneForwarder` calls this before delivering, and skips receivers that do not
     ///      answer `true` for `IReceiver`. Omitting it is invisible until production: the mock
     ///      forwarder used by `cre workflow simulate --broadcast` never asks.
-    function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
+    function supportsInterface(bytes4 interfaceId) public pure override returns (bool) {
         return interfaceId == type(IReceiver).interfaceId || interfaceId == type(IERC165).interfaceId;
     }
 
