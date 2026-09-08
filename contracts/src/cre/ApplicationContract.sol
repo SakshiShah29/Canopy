@@ -75,6 +75,37 @@ contract ApplicationContract {
         external
         returns (bytes32 applicationId)
     {
+        return _submit(msg.sender, broker, label, requestedTier);
+    }
+
+    /// @notice Submit on behalf of another wallet. **Demo only.**
+    ///
+    /// @dev The demo needs to file applications for wallets we do not hold keys for — a sanctioned
+    ///      address, an address too new to pass the age rule — and those have to be real addresses
+    ///      with real on-chain history or the screening step proves nothing.
+    ///
+    ///      `wallet` is the *only* thing this relaxes. `issuer` and `brokerPath` are still derived
+    ///      from `broker`, and the label collision check still runs. The earlier version took the
+    ///      issuer and the path as arguments, which quietly undid the guarantee the whole contract
+    ///      exists for: `brokerPath` is the rulebook key, so a caller who names it picks which
+    ///      policy they are judged under. Anyone could have asked for `zenith/_default`, been
+    ///      screened against the loosest rules in the book, and been minted into a broker whose real
+    ///      policy is far stricter — with the attestor none the wiser, since it derives the issuer
+    ///      itself and would have registered the name exactly as instructed.
+    ///
+    ///      This must not ship to production as-is: it lets anyone file an application naming
+    ///      someone else's wallet. Fine for a testnet demo, an unauthenticated write anywhere else.
+    function submitApplicationFor(address wallet, address broker, string calldata label, uint8 requestedTier)
+        external
+        returns (bytes32 applicationId)
+    {
+        return _submit(wallet, broker, label, requestedTier);
+    }
+
+    function _submit(address wallet, address broker, string calldata label, uint8 requestedTier)
+        internal
+        returns (bytes32 applicationId)
+    {
         if (requestedTier > 1) revert InvalidTier(requestedTier);
 
         // The report carries the label right-padded into a bytes32, so 32 is a hard ceiling.
@@ -112,9 +143,7 @@ contract ApplicationContract {
         require(len > 0 && len <= 32, "invalid label");
 
         uint256 nonce = nonces[wallet]++;
-        bytes32 applicationId = keccak256(
-            abi.encodePacked(wallet, block.timestamp, nonce)
-        );
+        applicationId = keccak256(abi.encode(wallet, broker, label, nonce));
 
         emit ApplicationSubmitted(
             applicationId,
