@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "e2e": "tsx scripts/e2e.ts",
+    "check:encoding": "tsx scripts/check-encoding.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
@@ -43,6 +45,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.4",
     "tailwindcss": "^4",
+    "tsx": "^4.23.13",
     "typescript": "^5"
   }
 }

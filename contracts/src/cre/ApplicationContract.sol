@@ -122,37 +122,12 @@ contract ApplicationContract {
             revert LabelTaken(label);
         }
 
-        uint256 nonce = nonces[msg.sender]++;
-        applicationId = keccak256(abi.encode(msg.sender, broker, label, nonce));
-
-        emit ApplicationSubmitted(applicationId, msg.sender, issuer, broker, brokerPath, label, requestedTier);
-    }
-
-    /// @notice Submit on behalf of any wallet — for testing/demo only.
-    /// @dev In production, the wallet would always be msg.sender.
-    function submitApplicationFor(
-        address wallet,
-        address issuer,
-        address broker,
-        string calldata brokerPath,
-        string calldata label,
-        uint8 requestedTier
-    ) external {
-        require(requestedTier <= 1, "invalid tier");
-        uint256 len = bytes(label).length;
-        require(len > 0 && len <= 32, "invalid label");
-
+        // `wallet`, not `msg.sender`: the two are the same for `submitApplication`, and differ for
+        // the demo variant. Reading `msg.sender` here silently filed every delegated application
+        // for the caller instead of the subject — the demo would have screened the wrong address.
         uint256 nonce = nonces[wallet]++;
         applicationId = keccak256(abi.encode(wallet, broker, label, nonce));
 
-        emit ApplicationSubmitted(
-            applicationId,
-            wallet,
-            issuer,
-            broker,
-            brokerPath,
-            label,
-            requestedTier
-        );
+        emit ApplicationSubmitted(applicationId, wallet, issuer, broker, brokerPath, label, requestedTier);
     }
 }

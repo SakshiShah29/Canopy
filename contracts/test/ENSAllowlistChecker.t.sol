@@ -59,12 +59,15 @@ contract ENSAllowlistCheckerTest is Test {
         vm.prank(OWNER);
         checker.setAttestor(ATTESTOR);
 
-        // `.eth` level
+        // `.eth` level. Both directions, because they are two separate calls upstream: the child
+        // asserts its parent, the parent delegates the label, and the walk requires them to agree.
         ethRegistry.register("canopy-demo", OWNER, FAR_FUTURE);
+        ethRegistry.setSubregistry("canopy-demo", IRegistry(address(issuerRegistry)));
         issuerRegistry.setParent(IRegistry(address(ethRegistry)), "canopy-demo");
 
         // issuer level
         issuerRegistry.register("brokerA", OWNER, BROKER_EXPIRY);
+        issuerRegistry.setSubregistry("brokerA", IRegistry(address(brokerARegistry)));
         brokerARegistry.setParent(IRegistry(address(issuerRegistry)), "brokerA");
 
         // broker level
@@ -220,20 +223,26 @@ contract ENSAllowlistCheckerTest is Test {
         _assertFlag(_check(ALICE), PermissionFlags.NONE);
     }
 
-    /// @dev A walk that never reaches `ROOT_ANCHOR` denies even when every name on it is alive.
+    /// @dev A walk that never reaches `ROOT_ANCHOR` denies even when every name on it is alive
+    ///      *and* every link is mutually confirmed. The impostor delegates the label back, so the
+    ///      only thing wrong with this hierarchy is where it terminates — which is the point.
     function test_walkNotReachingRootAnchorDenies() public {
         MockRegistry impostorRoot = new MockRegistry();
         impostorRoot.register("canopy-demo", OWNER, FAR_FUTURE);
+        impostorRoot.setSubregistry("canopy-demo", IRegistry(address(issuerRegistry)));
         issuerRegistry.setParent(IRegistry(address(impostorRoot)), "canopy-demo");
 
         _assertFlag(_check(ALICE), PermissionFlags.NONE);
     }
 
-    /// @dev A parent cycle must hit the hop bound and deny rather than run out of gas.
+    /// @dev A parent cycle must hit the hop bound and deny rather than run out of gas. Every link
+    ///      in the cycle is confirmed in both directions, so the hop bound is genuinely what stops
+    ///      it — otherwise this would deny at the first unconfirmed link and never reach the loop.
     function test_cyclicHierarchyTerminatesAndDenies() public {
         brokerARegistry.setParent(IRegistry(address(issuerRegistry)), "brokerA");
         issuerRegistry.setParent(IRegistry(address(brokerARegistry)), "loop");
         brokerARegistry.register("loop", OWNER, FAR_FUTURE);
+        brokerARegistry.setSubregistry("loop", IRegistry(address(issuerRegistry)));
 
         _assertFlag(_check(ALICE), PermissionFlags.NONE);
     }

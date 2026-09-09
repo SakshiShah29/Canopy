@@ -30,6 +30,8 @@ fs_permissions = [
     { access = "read-write", path = "./out" },
     # script/hierarchy.json — the declarative broker/investor config
     { access = "read", path = "./script" },
+    # generated reference encodings, diffed against frontend/lib/canopy.ts
+    { access = "read-write", path = "./test/fixtures" },
 ]
 
 [profile.ci]
