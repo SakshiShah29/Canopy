@@ -13,7 +13,6 @@ export default function BrokerDashboard() {
   const { issuerName, brokerName } = useRole();
   const { tree, loading } = useHierarchy();
 
-  // Find this broker in the tree
   const broker = tree?.children
     .find((i) => i.label === issuerName)
     ?.children.find((b) => b.label === brokerName);
@@ -21,35 +20,35 @@ export default function BrokerDashboard() {
   const fullName = broker?.fullName ?? `${brokerName}.${issuerName}.canopy.eth`;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <motion.div
         initial={{ opacity: 0, y: -10 }}
         animate={{ opacity: 1, y: 0 }}
       >
-        <h1
-          className="font-display text-2xl font-semibold tracking-tight md:text-3xl"
-          style={{ color: "#F5F0E8" }}
-        >
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-[#F5F0E8] md:text-3xl">
           Broker Dashboard
         </h1>
+        <p className="mt-1 text-sm text-[#F5F0E8]/30">
+          License status and investor management
+        </p>
       </motion.div>
 
       {loading && !tree ? (
         <div className="flex items-center justify-center py-20">
-          <Loader2 className="h-8 w-8 animate-spin text-canopy-400" />
+          <Loader2 className="h-8 w-8 animate-spin text-[#FFFBB8]/40" />
         </div>
       ) : (
         <>
           {/* Broker Identity Card */}
           <GlassCard className="!p-8">
-            <p className="font-mono text-sm text-stone-400">{fullName}</p>
+            <p className="font-mono text-sm text-[#FFFBB8]/60">{fullName}</p>
             {issuerName && (
-              <p className="mt-1 text-xs text-stone-500">
+              <p className="mt-1 text-xs text-[#F5F0E8]/20">
                 Issuer: {issuerName}.canopy.eth
               </p>
             )}
             <div className="mt-6">
-              <p className="mb-3 text-xs font-medium uppercase tracking-wider text-stone-500">
+              <p className="mb-3 text-[10px] font-semibold uppercase tracking-[0.15em] text-[#F5F0E8]/40">
                 YOUR LICENSE EXPIRES IN
               </p>
               <ExpiryCountdown
@@ -62,10 +61,7 @@ export default function BrokerDashboard() {
           {/* Investors */}
           {broker && broker.children.length > 0 && (
             <div>
-              <h2
-                className="mb-4 font-display text-lg font-semibold"
-                style={{ color: "#F5F0E8" }}
-              >
+              <h2 className="mb-4 font-display text-lg font-semibold text-[#F5F0E8]">
                 Active Investors
               </h2>
               <ScrollArea className="max-h-[400px]">

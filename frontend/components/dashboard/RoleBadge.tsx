@@ -15,30 +15,30 @@ const config: Record<
   { bg: string; text: string; border: string; icon: typeof ArrowLeftRight; label: string }
 > = {
   swap: {
-    bg: "bg-canopy-400/20",
-    text: "text-canopy-400",
-    border: "border-canopy-400/30",
+    bg: "bg-[#FFFBB8]/15",
+    text: "text-[#FFFBB8]",
+    border: "border-[#FFFBB8]/25",
     icon: ArrowLeftRight,
     label: "SWAP",
   },
   liquidity: {
-    bg: "bg-blue-400/20",
-    text: "text-blue-400",
-    border: "border-blue-400/30",
+    bg: "bg-amber-300/15",
+    text: "text-amber-300",
+    border: "border-amber-300/25",
     icon: Droplets,
     label: "LIQUIDITY",
   },
   expired: {
-    bg: "bg-red-500/20",
+    bg: "bg-red-500/15",
     text: "text-red-400",
-    border: "border-red-500/30",
+    border: "border-red-500/25",
     icon: XCircle,
     label: "EXPIRED",
   },
   pending: {
-    bg: "bg-amber-400/20",
-    text: "text-amber-400",
-    border: "border-amber-400/30",
+    bg: "bg-[#F5F0E8]/10",
+    text: "text-[#F5F0E8]/50",
+    border: "border-[#F5F0E8]/15",
     icon: Timer,
     label: "PENDING",
   },
@@ -55,7 +55,7 @@ export function RoleBadge({ role, className }: RoleBadgeProps) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold uppercase tracking-wider",
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider",
         c.bg,
         c.text,
         c.border,
@@ -68,7 +68,6 @@ export function RoleBadge({ role, className }: RoleBadgeProps) {
   );
 }
 
-/** Convenience: show appropriate badges given swap/liquidity/alive booleans */
 export function RoleBadges({
   swap,
   liquidity,

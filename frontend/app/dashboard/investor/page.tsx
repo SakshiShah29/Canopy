@@ -21,12 +21,10 @@ export default function InvestorDashboard() {
   const { tree, loading } = useHierarchy();
   const eligibility = useEligibility(address);
 
-  // Find the investor's broker
   const broker = tree?.children
     .find((i) => i.label === issuerName)
     ?.children.find((b) => b.label === brokerName);
 
-  // Find the investor node
   const investor = broker?.children.find((i) => i.label === investorName);
 
   const alive = investor?.isAlive && broker?.isAlive;
@@ -37,39 +35,38 @@ export default function InvestorDashboard() {
   const isSwapOnly = eligibility.canSwap && !eligibility.canProvideLiquidity;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <motion.div
         initial={{ opacity: 0, y: -10 }}
         animate={{ opacity: 1, y: 0 }}
       >
-        <h1
-          className="font-display text-2xl font-semibold tracking-tight md:text-3xl"
-          style={{ color: "#F5F0E8" }}
-        >
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-[#F5F0E8] md:text-3xl">
           Investor Dashboard
         </h1>
+        <p className="mt-1 text-sm text-[#F5F0E8]/30">
+          Your eligibility status and trading actions
+        </p>
       </motion.div>
 
       {loading && !tree ? (
         <div className="flex items-center justify-center py-20">
-          <Loader2 className="h-8 w-8 animate-spin text-canopy-400" />
+          <Loader2 className="h-8 w-8 animate-spin text-[#FFFBB8]/40" />
         </div>
       ) : (
         <>
           {/* Identity & Status Card */}
           <GlassCard
-            className={cn(
-              "!p-6",
-              alive === false && "border-red-500/30"
-            )}
+            className={cn("!p-6", alive === false && "border-red-500/20")}
           >
             <div className="flex items-center justify-between">
               <div>
-                <p className="font-mono text-sm" style={{ color: "#F5F0E8" }}>
+                <p className="font-mono text-sm text-[#FFFBB8]/60">
                   {fullName}
                 </p>
                 <div className="mt-2 flex items-center gap-2">
-                  <span className="text-xs text-stone-500">Tier:</span>
+                  <span className="text-[10px] font-semibold uppercase tracking-[0.15em] text-[#F5F0E8]/30">
+                    Tier
+                  </span>
                   {investor ? (
                     <RoleBadges
                       swap={investor.swap}
@@ -87,34 +84,30 @@ export default function InvestorDashboard() {
                   )}
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <span
+                className={cn(
+                  "flex items-center gap-1.5 text-sm font-medium",
+                  alive ? "text-[#FFFBB8]" : "text-red-400"
+                )}
+              >
                 <span
                   className={cn(
-                    "flex items-center gap-1.5 text-sm font-medium",
-                    alive ? "text-canopy-400" : "text-red-400"
+                    "h-2 w-2 rounded-full",
+                    alive ? "bg-[#FFFBB8]" : "bg-red-400"
                   )}
-                >
-                  <span
-                    className={cn(
-                      "h-2 w-2 rounded-full",
-                      alive ? "bg-canopy-400" : "bg-red-400"
-                    )}
-                  />
-                  {alive ? "ELIGIBLE" : "ACCESS REVOKED"}
-                </span>
-              </div>
+                />
+                {alive ? "ELIGIBLE" : "ACCESS REVOKED"}
+              </span>
             </div>
 
             {broker && (
-              <div className="mt-4 flex items-center gap-2 text-xs text-stone-500">
-                <span>
-                  Broker: {broker.fullName} (expires in{" "}
-                  <ExpiryCountdown
-                    expiry={broker.state?.expiry}
-                    variant="inline"
-                  />
-                  )
-                </span>
+              <div className="mt-4 flex items-center gap-2 text-xs text-[#F5F0E8]/30">
+                Broker: {broker.fullName} (expires in{" "}
+                <ExpiryCountdown
+                  expiry={broker.state?.expiry}
+                  variant="inline"
+                />
+                )
               </div>
             )}
 

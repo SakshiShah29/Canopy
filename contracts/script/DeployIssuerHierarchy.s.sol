@@ -86,6 +86,12 @@ interface IMockUSDCLike {
     function balanceOf(address account) external view returns (uint256);
 }
 
+interface IPermissionedResolverLike {
+    function initialize(address admin, uint256 roleBitmap, bytes[] calldata setters) external;
+    function setText(bytes32 node, string calldata key, string calldata value) external;
+    function text(bytes32 node, string calldata key) external view returns (string memory);
+}
+
 /// @title Build the Canopy issuer hierarchy on Sepolia
 ///
 /// @notice Run in phases, because registration is commit–reveal and the 60-second wait cannot
@@ -96,6 +102,7 @@ interface IMockUSDCLike {
 ///         forge script script/DeployIssuerHierarchy.s.sol --sig "registerParent()" --rpc-url sepolia --broadcast
 ///         forge script script/DeployIssuerHierarchy.s.sol --sig "buildHierarchy()" --rpc-url sepolia --broadcast
 ///         forge script script/DeployIssuerHierarchy.s.sol --sig "deployChecker()"  --rpc-url sepolia --broadcast
+///         forge script script/DeployIssuerHierarchy.s.sol --sig "writePolicies()"  --rpc-url sepolia --broadcast
 ///         forge script script/DeployIssuerHierarchy.s.sol --sig "verify()"         --rpc-url sepolia
 ///
 /// @dev Every phase is idempotent: it checks on-chain state first and skips work already done, so a
@@ -111,6 +118,14 @@ contract DeployIssuerHierarchy is Script {
     address internal constant VERIFIABLE_FACTORY = 0x894bc9cC8ff1ad96B8a288C86A8C71D662C07780;
     address internal constant USER_REGISTRY_IMPL = 0x47B442d0CF617c41CAbAFf5f02f44DD1e5f72546;
     address internal constant MOCK_USDC = 0xcBFD80F74375c54E545AF34788Ff465F96F66F05;
+    address internal constant PERMISSIONED_RESOLVER_IMPL = 0xa9d3814AB151BF6E37A427432795371a8361614e;
+
+    /// @dev PermissionedResolverLib role constants for text record writes.
+    uint256 internal constant RESOLVER_ROLE_SET_TEXT = 1 << 4;
+    uint256 internal constant RESOLVER_ROLE_SET_TEXT_ADMIN = RESOLVER_ROLE_SET_TEXT << 128;
+
+    /// @dev Standard ENS namehash for "eth".
+    bytes32 internal constant ETH_NAMEHASH = 0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae;
 
     // ---------------------------------------------------------------------
     // Parameters
@@ -646,6 +661,111 @@ contract DeployIssuerHierarchy is Script {
         require(issuers.length >= 2, "need at least two issuers to demonstrate isolation");
 
         console2.log("OK: tier split and cross-issuer isolation hold on live state");
+    }
+
+    // ---------------------------------------------------------------------
+    // Policy Chain — text records on the shared resolver
+    // ---------------------------------------------------------------------
+
+    /// @notice Set `canopy:policy` text records for issuers and brokers that declare a
+    ///         `policyHash` in `hierarchy.json`. Deploys a shared resolver proxy on first run.
+    ///
+    /// @dev Run after `buildHierarchy()`. Each name with a policyHash gets:
+    ///      1. Its resolver set to the shared Canopy resolver proxy
+    ///      2. A text record: key = "canopy:policy", value = "keccak256:0x<hash>"
+    ///
+    ///      Names without a policyHash are silently skipped — the script still works before
+    ///      any policies have been authored.
+    function writePolicies() public {
+        address deployer = _deployer();
+        address platformRegistry = _load("platformRegistry");
+        require(platformRegistry != address(0), "run commitParent() first");
+
+        string[] memory issuers = _issuerLabels();
+        require(issuers.length > 0, "no issuers in script/hierarchy.json");
+
+        vm.startBroadcast(_key());
+
+        address resolver = _ensureResolverProxy(deployer);
+        bytes32 parentNode = _namehash(ETH_NAMEHASH, _parentLabel());
+
+        for (uint256 s = 0; s < issuers.length; s++) {
+            address issuerRegistry = _load(_issuerKey(issuers[s]));
+            require(issuerRegistry != address(0), "run buildIssuers() first");
+
+            bytes32 issuerNode = _namehash(parentNode, issuers[s]);
+
+            // Issuer-level policy
+            string memory issuerPolicy = _policyHashAt(_issuerAt(s));
+            if (bytes(issuerPolicy).length > 0) {
+                _ensurePolicyRecord(platformRegistry, issuers[s], issuerNode, resolver, issuerPolicy);
+            }
+
+            // Broker-level policies
+            string[] memory brokers = _brokerLabelsOf(s);
+            for (uint256 b = 0; b < brokers.length; b++) {
+                string memory brokerPolicy = _policyHashAt(_brokerAt(s, b));
+                if (bytes(brokerPolicy).length > 0) {
+                    bytes32 brokerNode = _namehash(issuerNode, brokers[b]);
+                    _ensurePolicyRecord(issuerRegistry, brokers[b], brokerNode, resolver, brokerPolicy);
+                }
+            }
+        }
+
+        vm.stopBroadcast();
+    }
+
+    /// @dev Deploy a shared `PermissionedResolver` proxy via `VerifiableFactory`. The deployer
+    ///      is initialized with `ROLE_SET_TEXT | ROLE_SET_TEXT_ADMIN` on `ROOT_RESOURCE`, which
+    ///      lets it write text records for any name without per-node grants.
+    function _ensureResolverProxy(address deployer) internal returns (address resolver) {
+        resolver = _load("canopyResolver");
+        if (resolver != address(0) && resolver.code.length > 0) return resolver;
+
+        bytes[] memory emptySetters = new bytes[](0);
+        bytes memory initData = abi.encodeWithSelector(
+            IPermissionedResolverLike.initialize.selector,
+            deployer,
+            RESOLVER_ROLE_SET_TEXT | RESOLVER_ROLE_SET_TEXT_ADMIN,
+            emptySetters
+        );
+
+        resolver = IVerifiableFactoryLike(VERIFIABLE_FACTORY).deployProxy(
+            PERMISSIONED_RESOLVER_IMPL, uint256(keccak256("canopy.resolver.v1")), initData
+        );
+
+        _save("canopyResolver", resolver);
+        console2.log("canopyResolver", resolver);
+    }
+
+    /// @dev Set the resolver on a name and write its `canopy:policy` text record.
+    function _ensurePolicyRecord(
+        address registry,
+        string memory label,
+        bytes32 node,
+        address resolver,
+        string memory policyHash
+    ) internal {
+        IPermissionedRegistry(registry).setResolver(LibLabel.id(label), resolver);
+
+        string memory value = string.concat("keccak256:", policyHash);
+        IPermissionedResolverLike(resolver).setText(node, "canopy:policy", value);
+        console2.log(string.concat("policy record set for ", label), policyHash);
+    }
+
+    /// @dev Compute a child namehash from a parent node and a label string.
+    ///      `namehash(parent, label) = keccak256(abi.encodePacked(parent, keccak256(label)))`
+    function _namehash(bytes32 parent, string memory label) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(parent, keccak256(bytes(label))));
+    }
+
+    /// @dev Read the optional `policyHash` from the JSON node at `at`. Returns empty string
+    ///      if the key is absent or empty.
+    function _policyHashAt(string memory at) internal view returns (string memory) {
+        string memory json = _config();
+        string memory path = string.concat(at, ".policyHash");
+        if (!vm.keyExistsJson(json, path)) return "";
+        return vm.parseJsonString(json, path);
     }
 
     // ---------------------------------------------------------------------

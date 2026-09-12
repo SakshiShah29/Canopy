@@ -32,8 +32,8 @@ export default function DashboardRedirect() {
   return (
     <div className="flex flex-1 items-center justify-center py-32">
       <div className="flex flex-col items-center gap-4">
-        <Loader2 className="h-8 w-8 animate-spin text-canopy-400" />
-        <p className="text-sm text-stone-400">Detecting your role...</p>
+        <Loader2 className="h-8 w-8 animate-spin text-[#FFFBB8]/40" />
+        <p className="text-sm text-[#F5F0E8]/30">Detecting your role...</p>
       </div>
     </div>
   );

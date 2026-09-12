@@ -12,7 +12,6 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 export default function IssuerDashboard() {
   const { tree, loading, error, refresh } = useHierarchy();
 
-  // Find the demo broker (prime under acme — the one with short TTL)
   const demoBroker = tree?.children
     .flatMap((issuer) => issuer.children)
     .find((broker) => broker.label === "prime" && broker.state);
@@ -20,7 +19,7 @@ export default function IssuerDashboard() {
   const allBrokers = tree?.children.flatMap((issuer) => issuer.children) ?? [];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       {/* Page header */}
       <motion.div
         initial={{ opacity: 0, y: -10 }}
@@ -28,13 +27,10 @@ export default function IssuerDashboard() {
         className="flex items-center justify-between"
       >
         <div>
-          <h1
-            className="font-display text-2xl font-semibold tracking-tight md:text-3xl"
-            style={{ color: "#F5F0E8" }}
-          >
+          <h1 className="font-display text-2xl font-semibold tracking-tight text-[#F5F0E8] md:text-3xl">
             Issuer Dashboard
           </h1>
-          <p className="text-sm text-stone-400">
+          <p className="mt-1 text-sm text-[#F5F0E8]/30">
             Pool overview and broker management
           </p>
         </div>
@@ -43,7 +39,7 @@ export default function IssuerDashboard() {
           size="sm"
           onClick={refresh}
           disabled={loading}
-          className="text-stone-500"
+          className="text-[#F5F0E8]/30 hover:text-[#FFFBB8] hover:bg-[#FFFBB8]/10"
         >
           {loading ? (
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -53,7 +49,7 @@ export default function IssuerDashboard() {
         </Button>
       </motion.div>
 
-      {/* Hero countdown for demo broker */}
+      {/* Hero countdown */}
       {demoBroker && (
         <ExpiryCountdown expiry={demoBroker.state?.expiry} variant="hero" />
       )}
@@ -61,28 +57,23 @@ export default function IssuerDashboard() {
       {/* Pool stats */}
       {tree && <PoolStatus tree={tree} />}
 
-      {/* Error */}
       {error && (
-        <div className="glass-card border-red-500/30 text-sm text-red-400">
+        <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-400">
           {error}
         </div>
       )}
 
-      {/* Loading */}
       {loading && !tree && (
         <div className="flex items-center justify-center py-20">
-          <Loader2 className="h-8 w-8 animate-spin text-canopy-400" />
+          <Loader2 className="h-8 w-8 animate-spin text-[#FFFBB8]/40" />
         </div>
       )}
 
       {/* Brokers section */}
       {tree && (
         <div>
-          <div className="mb-4 flex items-center justify-between">
-            <h2
-              className="font-display text-lg font-semibold"
-              style={{ color: "#F5F0E8" }}
-            >
+          <div className="mb-4">
+            <h2 className="font-display text-lg font-semibold text-[#F5F0E8]">
               Brokers
             </h2>
           </div>
@@ -92,7 +83,7 @@ export default function IssuerDashboard() {
                 <BrokerRow key={broker.fullName} broker={broker} />
               ))}
               {allBrokers.length === 0 && (
-                <p className="py-8 text-center text-sm text-stone-500">
+                <p className="py-8 text-center text-sm text-[#F5F0E8]/20">
                   No brokers registered
                 </p>
               )}

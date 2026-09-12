@@ -26,6 +26,8 @@ export const configSchema = z.object({
 	applicationContractAddress: z.string(),
 	mintAttestorAddress: z.string(),
 	mainnetRpcUrl: z.string(),
+	sepoliaRpcUrl: z.string(),
+	resolverAddress: z.string(),
 	etherscanBaseUrl: z.string(),
 	goplusBaseUrl: z.string(),
 	chainalysisOracleAddress: z.string(),
@@ -425,6 +427,102 @@ function checkWalletAge(
 	return Math.max(0, walletAgeDays)
 }
 
+// ─── Policy Chain — on-chain text record verification ─────────
+
+// PermissionedResolver.text(bytes32 node, string key) → string
+const TEXT_RESOLVER_ABI = [
+	{
+		name: 'text',
+		type: 'function' as const,
+		inputs: [
+			{ name: 'node', type: 'bytes32' as const },
+			{ name: 'key', type: 'string' as const },
+		],
+		outputs: [{ name: '', type: 'string' as const }],
+		stateMutability: 'view' as const,
+	},
+] as const
+
+// Standard ENS namehash for "eth"
+const ETH_NAMEHASH =
+	'0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae' as `0x${string}`
+
+// Compute namehash for a broker from its brokerPath.
+// brokerPath = "acme/prime" → namehash("prime.acme.canopy.eth")
+function computeBrokerNode(brokerPath: string): `0x${string}` {
+	// Start from canopy.eth
+	const canopyLabel = keccak256(toHex(toBytes('canopy')))
+	let node = keccak256(
+		`0x${ETH_NAMEHASH.slice(2)}${canopyLabel.slice(2)}` as `0x${string}`
+	)
+
+	// Walk the path: "acme/prime" → hash "acme", then "prime"
+	const segments = brokerPath.split('/')
+	for (const segment of segments) {
+		const labelHash = keccak256(toHex(toBytes(segment)))
+		node = keccak256(
+			`0x${node.slice(2)}${labelHash.slice(2)}` as `0x${string}`
+		)
+	}
+
+	return node
+}
+
+// Read a text record from the PermissionedResolver on Sepolia via HTTP eth_call.
+// Returns null on failure or when no record exists — the caller decides what that means.
+function readTextRecord(
+	runtime: TeeRuntime<Config>,
+	resolverAddress: string,
+	node: `0x${string}`,
+	key: string,
+): string | null {
+	const config = runtime.config
+	const httpClient = new cre.capabilities.HTTPClient()
+
+	const calldata = encodeFunctionData({
+		abi: TEXT_RESOLVER_ABI,
+		functionName: 'text',
+		args: [node, key],
+	})
+
+	const resp = httpClient
+		.sendRequest(runtime, {
+			url: config.sepoliaRpcUrl,
+			method: 'POST',
+			multiHeaders: { 'Content-Type': { values: ['application/json'] } },
+			body: toBase64Body(
+				JSON.stringify({
+					jsonrpc: '2.0',
+					id: 1,
+					method: 'eth_call',
+					params: [
+						{ to: resolverAddress, data: calldata },
+						'latest',
+					],
+				})
+			),
+		})
+		.result()
+
+	if (!ok(resp)) {
+		runtime.log('Text record read failed — skipping policy verification')
+		return null
+	}
+
+	const rpcResult = JSON.parse(text(resp))
+	if (rpcResult.error || !rpcResult.result || rpcResult.result === '0x') {
+		return null
+	}
+
+	const decoded = decodeFunctionResult({
+		abi: TEXT_RESOLVER_ABI,
+		functionName: 'text',
+		data: rpcResult.result as `0x${string}`,
+	}) as string
+
+	return decoded || null
+}
+
 // ─── Main TEE Handler ───────────────────────────────────────
 // Everything in this function runs inside the AWS Nitro enclave until
 // we explicitly cross back with `usingTheDons()`.
@@ -500,6 +598,44 @@ export const onApplicationSubmitted = (
 	// The RULEBOOK is a Vault-DON secret. Broker overrides tighten, never loosen.
 	const effectivePolicy = lookupPolicy(rulebook, brokerPath)
 
+	// ── Step 6b: Verify policy hash against on-chain text record ──
+	// The broker's policy hash is pinned to their ENS name as a text record.
+	// Verifying it proves the CRE evaluated against the policy the broker committed to,
+	// not a secretly rewritten one.
+	let policyMismatch = false
+	const brokerNode = computeBrokerNode(brokerPath)
+	const onChainPolicyText = readTextRecord(
+		runtime,
+		config.resolverAddress,
+		brokerNode,
+		'canopy:policy'
+	)
+
+	if (onChainPolicyText) {
+		// Extract the hash from "keccak256:0x..."
+		const onChainHash = onChainPolicyText.replace('keccak256:', '')
+
+		// Compute hash of the effective policy body from the rulebook.
+		// Use the broker-specific entry if it exists, otherwise the issuer default.
+		const issuerLabel = brokerPath.split('/')[0]
+		const policyBody =
+			rulebook[brokerPath] ?? rulebook[`${issuerLabel}/_default`]
+		const canonical = JSON.stringify(
+			policyBody,
+			Object.keys(policyBody).sort()
+		)
+		const computedHash = keccak256(toHex(toBytes(canonical)))
+
+		if (onChainHash.toLowerCase() !== computedHash.toLowerCase()) {
+			runtime.log(
+				'Policy hash mismatch — on-chain anchor differs from Vault-DON body'
+			)
+			policyMismatch = true
+		}
+	}
+	// If no text record is set, skip verification (backwards-compatible with pre-policy names).
+	// If the RPC read failed, skip verification (fail-open on read, fail-closed on mismatch).
+
 	// ── Step 7: Compute risk score ──
 	// The formula is public (in this source code). The thresholds it is compared
 	// against (minScore, minAgeDays, etc.) are in the secret RULEBOOK.
@@ -509,15 +645,22 @@ export const onApplicationSubmitted = (
 	runtime.log(`WalletAgeDays=${walletAgeDays}, RiskScore=${riskScore}`)
 
 	// ── Step 8: Evaluate against policy ──
-	const verdict = evaluate(
-		riskScore,
-		walletAgeDays,
-		isSanctioned,
-		goplusResult,
-		effectivePolicy,
-		requestedTier,
-		nowSeconds,
-	)
+	const verdict = policyMismatch
+		? {
+				approved: false,
+				roleBitmap: 0n,
+				expiry: 0n,
+				reason: 'POLICY_MISMATCH',
+			}
+		: evaluate(
+				riskScore,
+				walletAgeDays,
+				isSanctioned,
+				goplusResult,
+				effectivePolicy,
+				requestedTier,
+				nowSeconds,
+			)
 
 	// Deliberately not logged. `verdict.reason` names the factor that decided the case
 	// (SCORE_BELOW_THRESHOLD, MIXER_ASSOCIATED, WALLET_TOO_NEW), and "which specific factors caused

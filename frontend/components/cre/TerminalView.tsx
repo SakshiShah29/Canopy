@@ -78,25 +78,25 @@ export function TerminalView() {
   }, [visibleCount, lines.length]);
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-white/[0.08]">
+    <div className="overflow-hidden rounded-2xl border border-[#FFFBB8]/[0.08]">
       {/* Terminal chrome */}
-      <div className="flex items-center gap-2 border-b border-white/[0.06] bg-[#0C0C0C] px-4 py-3">
+      <div className="flex items-center gap-2 border-b border-[#FFFBB8]/[0.06] bg-[#0e0d08] px-4 py-3">
         <span className="h-3 w-3 rounded-full bg-red-500/80" />
-        <span className="h-3 w-3 rounded-full bg-amber-500/80" />
-        <span className="h-3 w-3 rounded-full bg-green-500/80" />
-        <span className="ml-4 text-xs text-stone-500">
+        <span className="h-3 w-3 rounded-full bg-amber-400/80" />
+        <span className="h-3 w-3 rounded-full bg-[#FFFBB8]/60" />
+        <span className="ml-4 text-xs text-[#F5F0E8]/30">
           Canopy CRE &middot; Confidential Workflow
         </span>
       </div>
 
       {/* Terminal body */}
-      <ScrollArea className="h-[600px] bg-[#0C0C0C] p-6">
+      <ScrollArea className="h-[600px] bg-[#0e0d08] p-6">
         <div className="space-y-1">
           {lines.slice(0, visibleCount).map((line, i) => (
             <TerminalLine key={i} line={line} index={i} />
           ))}
           {visibleCount < lines.length && (
-            <span className="inline-block h-4 w-2 bg-canopy-400 animate-caret" />
+            <span className="inline-block h-4 w-2 bg-[#FFFBB8] animate-caret" />
           )}
         </div>
       </ScrollArea>

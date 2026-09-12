@@ -40,6 +40,7 @@ contract MintAttestor is IReceiver {
     error UnsupportedKind(uint8 kind);
     error SubnameAlreadyRegistered(address subject);
     error NoCheckerForIssuer(address issuerRegistry);
+    error CeilingNotSet(address parentRegistry);
     error NotOwner(address caller);
 
     // ── Events ───────────────────────────────────────────────────
@@ -47,6 +48,8 @@ contract MintAttestor is IReceiver {
     event SubnameMinted(address indexed subject, address indexed parentRegistry, address indexed issuerRegistry);
     event CheckerSet(address indexed issuerRegistry, address checker);
     event AllowedWorkflowIdSet(bytes32 workflowId);
+    event CeilingSet(address indexed parentRegistry, uint256 ceiling);
+    event RoleClamped(address indexed subject, address indexed parentRegistry, uint256 original, uint256 effective);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     // ── Constants ────────────────────────────────────────────────
@@ -68,6 +71,14 @@ contract MintAttestor is IReceiver {
     /// @notice One checker per issuer — eligibility is issuer-scoped, so the leaf has to be
     ///         recorded in the checker that answers for that issuer's pool.
     mapping(address issuerRegistry => ENSAllowlistChecker) public checkerOf;
+
+    /// @notice Per-broker role ceiling. The CRE-assigned bitmap is AND-masked against this
+    ///         before registration. A swap-only broker sets `ROLE_ELIGIBLE_SWAP`; the enclave
+    ///         can approve liquidity, but the chain won't write it.
+    ///
+    /// @dev Zero means "not configured" and causes `CeilingNotSet` — this is fail-closed.
+    ///      Set `type(uint256).max` for "no restriction". See `WorkflowNotSet()` for precedent.
+    mapping(address parentRegistry => uint256) public ceilingOf;
 
     constructor(address forwarder, IRegistry platformRegistry, address initialOwner) {
         FORWARDER = forwarder;
@@ -101,6 +112,20 @@ contract MintAttestor is IReceiver {
     function setChecker(address issuerRegistry, ENSAllowlistChecker checker) external onlyOwner {
         checkerOf[issuerRegistry] = checker;
         emit CheckerSet(issuerRegistry, address(checker));
+    }
+
+    /// @notice Set the role ceiling for a broker's registry. The CRE bitmap is AND-masked
+    ///         against this before the subname is registered.
+    ///
+    /// @dev Set `type(uint256).max` for "no restriction". Zero is rejected because it would
+    ///      silently strip every role — if that's the intent, don't wire the checker instead.
+    ///
+    /// @param parentRegistry The broker's registry address (same as `parentRegistry` in the report).
+    /// @param ceiling        The maximum roles this broker's investors may hold.
+    function setCeiling(address parentRegistry, uint256 ceiling) external onlyOwner {
+        require(ceiling != 0, "zero ceiling would strip all roles; leave checker unwired instead");
+        ceilingOf[parentRegistry] = ceiling;
+        emit CeilingSet(parentRegistry, ceiling);
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
@@ -158,47 +183,64 @@ contract MintAttestor is IReceiver {
 
         if (kind != KIND_INVESTOR) revert UnsupportedKind(kind);
 
+        _processApproval(subject, labelBytes, parentRegistry, roleBitmap, expiry);
+    }
+
+    // ── Internal ─────────────────────────────────────────────────
+
+    /// @dev Extracted from `onReport` to keep the stack under 16 slots.
+    function _processApproval(
+        address subject,
+        bytes32 labelBytes,
+        address parentRegistry,
+        uint256 roleBitmap,
+        uint64 expiry
+    ) internal {
         // ── 3. Which issuer's checker? Ask the chain, not the report ──
-        // The report chooses where the name is minted; the hierarchy above that registry decides
-        // which pool the eligibility is good for. Reading the issuer here rather than trusting a
-        // field means a workflow that produced a bad report still cannot direct eligibility into
-        // an unrelated issuer's pool.
         address issuerRegistry = LibCanopyPath.issuerOf(PLATFORM_REGISTRY, IRegistry(parentRegistry));
         ENSAllowlistChecker checker = checkerOf[issuerRegistry];
         if (address(checker) == address(0)) revert NoCheckerForIssuer(issuerRegistry);
 
+        // ── 3b. Clamp roles to the broker's ceiling ──
+        {
+            uint256 ceiling = ceilingOf[parentRegistry];
+            if (ceiling == 0) revert CeilingNotSet(parentRegistry);
+
+            uint256 effectiveRoles = roleBitmap & ceiling;
+            if (effectiveRoles != roleBitmap) {
+                emit RoleClamped(subject, parentRegistry, roleBitmap, effectiveRoles);
+            }
+            roleBitmap = effectiveRoles; // reuse the parameter slot
+        }
+
         // ── 4. Register the subname, unless it is already live ──
+        _registerAndRecord(subject, labelBytes, parentRegistry, roleBitmap, expiry, checker);
+
+        emit SubnameMinted(subject, parentRegistry, issuerRegistry);
+    }
+
+    function _registerAndRecord(
+        address subject,
+        bytes32 labelBytes,
+        address parentRegistry,
+        uint256 roles,
+        uint64 expiry,
+        ENSAllowlistChecker checker
+    ) internal {
         string memory label = _bytes32ToString(labelBytes);
         uint256 labelhash = LibLabel.id(label);
 
         IPermissionedRegistry registry = IPermissionedRegistry(parentRegistry);
         IPermissionedRegistry.State memory state = registry.getState(labelhash);
 
-        bool alive = state.status == IPermissionedRegistry.Status.REGISTERED && state.expiry > block.timestamp;
-
-        if (alive) {
-            // Someone else already holds this name under this broker. `ApplicationContract` rejects
-            // this case up front, so reaching it means the name was taken between application and
-            // delivery.
+        if (state.status == IPermissionedRegistry.Status.REGISTERED && state.expiry > block.timestamp) {
             if (state.latestOwner != subject) revert SubnameAlreadyRegistered(subject);
         } else {
-            registry.register(
-                label,
-                subject,
-                IRegistry(address(0)), // an investor leaf has no subregistry
-                address(0), // and no resolver
-                roleBitmap,
-                expiry
-            );
+            registry.register(label, subject, IRegistry(address(0)), address(0), roles, expiry);
         }
 
         // ── 5. Record the leaf ──
-        // Deliberately outside the branch above. A checker redeployment (PERMISSIONED_TOKEN is
-        // immutable, so it happens) leaves the name registered but the new checker empty; running
-        // the same verdict again must be able to repair that rather than return early.
         checker.recordPath(subject, registry, labelhash);
-
-        emit SubnameMinted(subject, parentRegistry, issuerRegistry);
     }
 
     // ── Helpers ──────────────────────────────────────────────────

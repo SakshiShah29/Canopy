@@ -14,14 +14,14 @@ const navItems = [
   { label: "Dashboard", href: "/dashboard" },
   { label: "Explorer", href: "/dashboard/explorer" },
   { label: "CRE Terminal", href: "/dashboard/cre" },
-  { label: "Apply", href: "/dashboard/apply" },
+  { label: "Marketplace", href: "/dashboard/marketplace" },
 ];
 
 const roleBadgeStyles: Record<string, string> = {
-  issuer: "bg-amber-400/20 text-amber-400 border-amber-400/30",
-  broker: "bg-blue-400/20 text-blue-400 border-blue-400/30",
-  investor: "bg-canopy-400/20 text-canopy-400 border-canopy-400/30",
-  applicant: "bg-stone-400/20 text-stone-400 border-stone-400/30",
+  issuer: "bg-[#FFFBB8]/15 text-[#FFFBB8] border-[#FFFBB8]/25",
+  broker: "bg-amber-300/15 text-amber-300 border-amber-300/25",
+  investor: "bg-[#FFFBB8]/15 text-[#FFFBB8] border-[#FFFBB8]/25",
+  applicant: "bg-[#F5F0E8]/10 text-[#F5F0E8]/40 border-[#F5F0E8]/15",
 };
 
 export function Navbar() {
@@ -65,8 +65,8 @@ export function Navbar() {
               className={cn(
                 "hidden text-xs transition-colors sm:inline-block md:text-sm",
                 isActive
-                  ? "text-canopy-400"
-                  : "text-[#F5F0E8]/60 hover:text-[#F5F0E8]"
+                  ? "text-[#FFFBB8]"
+                  : "text-[#F5F0E8]/40 hover:text-[#F5F0E8]/80"
               )}
             >
               {item.label}
@@ -75,7 +75,7 @@ export function Navbar() {
         })}
 
         {/* Spacer */}
-        <div className="hidden w-px self-stretch bg-white/[0.08] sm:block" />
+        <div className="hidden w-px self-stretch bg-[#FFFBB8]/[0.08] sm:block" />
 
         {/* Role badge */}
         {authenticated && (
@@ -94,13 +94,13 @@ export function Navbar() {
         {ready && authenticated ? (
           <div className="flex items-center gap-2">
             {shortAddress && (
-              <span className="hidden rounded-full border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 font-mono text-[10px] text-stone-400 md:inline-flex">
+              <span className="hidden rounded-full border border-[#FFFBB8]/[0.08] bg-[#FFFBB8]/[0.04] px-2.5 py-1 font-mono text-[10px] text-[#F5F0E8]/40 md:inline-flex">
                 {shortAddress}
               </span>
             )}
             <button
               onClick={logout}
-              className="text-stone-500 transition-colors hover:text-stone-300"
+              className="text-[#F5F0E8]/30 transition-colors hover:text-[#F5F0E8]/60"
             >
               <LogOut className="h-4 w-4" />
             </button>
@@ -109,7 +109,7 @@ export function Navbar() {
           <Button
             onClick={login}
             size="sm"
-            className="bg-canopy-500 text-black hover:bg-canopy-500/90 text-xs"
+            className="bg-[#FFFBB8] text-[#1a1710] font-semibold hover:bg-[#FFFBB8]/90 text-xs"
           >
             <Wallet className="mr-1.5 h-3.5 w-3.5" />
             Connect

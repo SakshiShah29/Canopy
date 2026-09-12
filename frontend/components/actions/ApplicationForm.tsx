@@ -49,7 +49,6 @@ export function ApplicationForm() {
       toast.success("Application submitted!", {
         description: `Tx: ${receipt.hash.slice(0, 18)}...`,
       });
-      // Redirect to CRE terminal to watch the workflow
       router.push("/dashboard/cre");
     } catch (err) {
       toast.error("Application failed", {
@@ -62,20 +61,17 @@ export function ApplicationForm() {
 
   return (
     <GlassCard className="mx-auto max-w-lg !p-8">
-      <h2
-        className="mb-6 text-center font-display text-2xl font-semibold"
-        style={{ color: "#F5F0E8" }}
-      >
+      <h2 className="mb-6 text-center font-display text-2xl font-semibold text-[#F5F0E8]">
         Apply for Pool Access
       </h2>
 
       <form onSubmit={handleSubmit} className="space-y-5">
         <div>
-          <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-stone-500">
+          <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-[0.15em] text-[#F5F0E8]/30">
             Select Issuer
           </label>
           <Select value={issuer} onValueChange={(v) => setIssuer(v ?? "")}>
-            <SelectTrigger className="border-white/[0.08] bg-white/[0.04]">
+            <SelectTrigger className="border-[#FFFBB8]/[0.08] bg-[#FFFBB8]/[0.03]">
               <SelectValue placeholder="Choose issuer..." />
             </SelectTrigger>
             <SelectContent>
@@ -89,7 +85,7 @@ export function ApplicationForm() {
         </div>
 
         <div>
-          <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-stone-500">
+          <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-[0.15em] text-[#F5F0E8]/30">
             Select Broker
           </label>
           <Select
@@ -97,7 +93,7 @@ export function ApplicationForm() {
             onValueChange={(v) => setBroker(v ?? "")}
             disabled={!issuer}
           >
-            <SelectTrigger className="border-white/[0.08] bg-white/[0.04]">
+            <SelectTrigger className="border-[#FFFBB8]/[0.08] bg-[#FFFBB8]/[0.03]">
               <SelectValue placeholder="Choose broker..." />
             </SelectTrigger>
             <SelectContent>
@@ -111,61 +107,57 @@ export function ApplicationForm() {
         </div>
 
         <div>
-          <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-stone-500">
+          <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-[0.15em] text-[#F5F0E8]/30">
             Requested Tier
           </label>
           <div className="space-y-2">
-            <label className="flex items-center gap-3 rounded-lg border border-white/[0.08] bg-white/[0.02] p-3 cursor-pointer transition-colors hover:border-white/[0.12]">
+            <label className="flex items-center gap-3 rounded-xl border border-[#FFFBB8]/[0.08] bg-[#FFFBB8]/[0.02] p-3 cursor-pointer transition-colors hover:border-[#FFFBB8]/[0.15]">
               <input
                 type="radio"
                 name="tier"
                 value="0"
                 checked={tier === "0"}
                 onChange={() => setTier("0")}
-                className="accent-canopy-500"
+                className="accent-[#FFFBB8]"
               />
-              <div>
-                <p className="text-sm font-medium" style={{ color: "#F5F0E8" }}>
-                  Retail (swap only)
-                </p>
-              </div>
+              <p className="text-sm font-medium text-[#F5F0E8]">
+                Retail (swap only)
+              </p>
             </label>
-            <label className="flex items-center gap-3 rounded-lg border border-white/[0.08] bg-white/[0.02] p-3 cursor-pointer transition-colors hover:border-white/[0.12]">
+            <label className="flex items-center gap-3 rounded-xl border border-[#FFFBB8]/[0.08] bg-[#FFFBB8]/[0.02] p-3 cursor-pointer transition-colors hover:border-[#FFFBB8]/[0.15]">
               <input
                 type="radio"
                 name="tier"
                 value="1"
                 checked={tier === "1"}
                 onChange={() => setTier("1")}
-                className="accent-canopy-500"
+                className="accent-[#FFFBB8]"
               />
-              <div>
-                <p className="text-sm font-medium" style={{ color: "#F5F0E8" }}>
-                  Market Maker (swap + liquidity)
-                </p>
-              </div>
+              <p className="text-sm font-medium text-[#F5F0E8]">
+                Market Maker (swap + liquidity)
+              </p>
             </label>
           </div>
         </div>
 
         <div>
-          <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-stone-500">
+          <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-[0.15em] text-[#F5F0E8]/30">
             Preferred Label
           </label>
           <Input
             value={label}
             onChange={(e) => setLabel(e.target.value)}
             placeholder="alice"
-            className="border-white/[0.08] bg-white/[0.04] font-mono"
+            className="border-[#FFFBB8]/[0.08] bg-[#FFFBB8]/[0.03] font-mono text-[#F5F0E8] placeholder:text-[#F5F0E8]/20"
           />
           {label && issuer && broker && (
-            <p className="mt-1.5 text-xs text-stone-500">
+            <p className="mt-1.5 text-xs text-[#FFFBB8]/40">
               Will register: {label}.{broker}.{issuer}.canopy.eth
             </p>
           )}
         </div>
 
-        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs text-stone-500 leading-relaxed">
+        <div className="rounded-xl border border-[#FFFBB8]/[0.06] bg-[#FFFBB8]/[0.02] p-3 text-xs text-[#F5F0E8]/30 leading-relaxed">
           Your KYC data will be processed inside a Chainlink CRE trusted
           execution environment. No personal information is stored on-chain.
           Only the verdict (approved/rejected) is published.
@@ -174,7 +166,7 @@ export function ApplicationForm() {
         <Button
           type="submit"
           disabled={!authenticated || !broker || !label || pending}
-          className="w-full bg-canopy-500 text-black hover:bg-canopy-500/90"
+          className="w-full bg-[#FFFBB8] text-[#1a1710] font-semibold hover:bg-[#FFFBB8]/90 disabled:opacity-40"
         >
           {pending ? (
             <>

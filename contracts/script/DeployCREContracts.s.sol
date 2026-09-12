@@ -123,6 +123,20 @@ contract DeployCREContracts is Script {
         vm.stopBroadcast();
     }
 
+    /// @notice Set the role ceiling for a broker's registry.
+    function setCeiling(address brokerRegistry, uint256 ceiling) public {
+        address attestor = _load("mintAttestor");
+        require(attestor != address(0), "run run() first");
+        require(brokerRegistry != address(0), "broker registry required");
+
+        vm.startBroadcast(_key());
+        MintAttestor(attestor).setCeiling(brokerRegistry, ceiling);
+        vm.stopBroadcast();
+
+        console2.log("ceiling set on broker", brokerRegistry);
+        console2.log("ceiling value        ", ceiling);
+    }
+
     /// @notice Read back what an operator is most likely to have half-finished.
     function verify() public view {
         address attestor = _load("mintAttestor");

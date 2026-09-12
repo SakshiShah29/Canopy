@@ -57,6 +57,7 @@ import {
   hierarchyOf,
   issuers,
   issuersOf,
+  labelId,
   removeLiquidity,
   swap,
   type Canopy,
@@ -241,9 +242,40 @@ async function brokerExpiry(issuer: string, broker: string): Promise<bigint> {
 }
 
 /** `LibLabel.id` — keccak of the label with the low 32 bits cleared for the version counter. */
-function labelId(label: string): Hex {
+function localLabelId(label: string): Hex {
   const hash = BigInt(keccak256(toHex(label)))
   return `0x${(hash & ~0xffffffffn).toString(16).padStart(64, '0')}` as Hex
+}
+
+// ── ABIs for new-feature verification ───────────────────────────
+
+const mintAttestorReadAbi = [
+  { type: 'function', name: 'ceilingOf', stateMutability: 'view', inputs: [{ name: 'parentRegistry', type: 'address' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'owner', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+] as const
+
+const resolverTextAbi = [
+  { type: 'function', name: 'text', stateMutability: 'view', inputs: [{ name: 'node', type: 'bytes32' }, { name: 'key', type: 'string' }], outputs: [{ type: 'string' }] },
+] as const
+
+// Role constants from CanopyRoles.sol
+const ROLE_ELIGIBLE_SWAP = 1n << 64n
+const ROLE_ELIGIBLE_LIQUIDITY = 1n << 68n
+
+/** ENS namehash for "eth" */
+const ETH_NAMEHASH = '0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae' as Hex
+
+/** Compute namehash for a broker path like "acme/prime" → namehash("prime.acme.canopy.eth") */
+function computeBrokerNode(brokerPath: string): Hex {
+  const canopyLabel = keccak256(toHex('canopy'))
+  let node = keccak256((`0x${ETH_NAMEHASH.slice(2)}${canopyLabel.slice(2)}`) as Hex)
+
+  const segments = brokerPath.split('/')
+  for (const segment of segments) {
+    const lh = keccak256(toHex(segment))
+    node = keccak256((`0x${node.slice(2)}${lh.slice(2)}`) as Hex)
+  }
+  return node
 }
 
 /**
